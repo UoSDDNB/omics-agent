@@ -2,6 +2,7 @@ import hashlib
 import json
 import os
 import re
+import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, replace
 from pathlib import Path
@@ -143,10 +144,16 @@ client = anthropic.Anthropic()
 LOCAL_LLM_URL = os.environ.get("LOCAL_LLM_URL", "").rstrip("/")
 LOCAL_LLM_MODEL = os.environ.get("LOCAL_LLM_MODEL", "")
 LOCAL_LLM_THINK = os.environ.get("LOCAL_LLM_THINK") == "1"
+# OMICS_FRESH_ANSWERS=1 ignores remembered triage and screen answers, so a timing run measures real model calls.
+FRESH_ANSWERS = os.environ.get("OMICS_FRESH_ANSWERS") == "1"
+# Every local-model call is recorded here (stage, seconds, tokens in and out) so a run can be profiled; `run` resets it.
+TRACE: list[dict] = []
+STAGE = ["start"]
 
 
 def _ask_local(prompt: str, schema: dict, cached: str, think: bool, max_tokens: int) -> dict:
     """The same contract as `_ask`, on a local model; the server constrains decoding to the JSON schema."""
+    started = time.monotonic()
     response = httpx.post(
         f"{LOCAL_LLM_URL}/chat/completions",
         json={
@@ -160,7 +167,11 @@ def _ask_local(prompt: str, schema: dict, cached: str, think: bool, max_tokens: 
         timeout=1800,
     )
     response.raise_for_status()
-    choice = response.json()["choices"][0]
+    body = response.json()
+    usage = body.get("usage") or {}
+    TRACE.append({"stage": STAGE[0], "seconds": round(time.monotonic() - started, 2), "tokens_in": usage.get("prompt_tokens", 0),
+                  "tokens_out": usage.get("completion_tokens", 0), "max_tokens": max_tokens})
+    choice = body["choices"][0]
     if choice["finish_reason"] == "length":
         raise RuntimeError("The local model ran out of tokens before finishing its answer.")
     return json.loads(choice["message"]["content"])
@@ -474,8 +485,17 @@ Candidate datasets:
 
 For every numbered candidate, give a one-sentence reason a non-expert can follow, then answer the four checks from its text. Answer 'unclear' when the text does not say. For evidence, copy one short exact phrase from that candidate's text that supports the checks."""
 
-TRIAGE_BATCH = 25
-SCREEN_BATCH = 4
+# Batch sizes and listing lengths; the environment can override them for timing experiments (docs/evidence/qwen/).
+TRIAGE_BATCH = int(os.environ.get("OMICS_TRIAGE_BATCH") or 25)
+SCREEN_BATCH = int(os.environ.get("OMICS_SCREEN_BATCH") or 4)
+SCREEN_CHARS = int(os.environ.get("OMICS_SCREEN_CHARS") or 1500)
+TRIAGE_CHARS = int(os.environ.get("OMICS_TRIAGE_CHARS") or 250)
+# Compact triage answers: one list of scores in listing order instead of {n, score} objects, a tenth of the output
+# tokens. A list of the wrong length falls back to the numbered form for that batch.
+TRIAGE_COMPACT = os.environ.get("OMICS_TRIAGE_COMPACT") == "1"
+TRIAGE_COMPACT_SCHEMA = {"type": "object", "properties": {"scores": {"type": "array", "items": {"type": "integer", "enum": [0, 1, 2, 3]}}},
+                         "required": ["scores"], "additionalProperties": False}
+TRIAGE_COMPACT_NOTE = "\n\nReturn one list of scores, in the same order as the numbered datasets, one score per dataset."
 
 
 def _listing(batch: list[Dataset], chars: int) -> str:
@@ -489,7 +509,7 @@ def _answers(name: str, template: str, question: str, schema: dict, candidates: 
     version = hashlib.sha1((template + json.dumps(schema)).encode()).hexdigest()[:8]
     slot = "question " + hashlib.sha1(" ".join(question.lower().split()).encode()).hexdigest()[:16]
     kind = f"{name} answers #{version}"
-    known = store.cached_facts(slot, kind) or {}
+    known = {} if FRESH_ANSWERS else store.cached_facts(slot, kind) or {}
     missing = [d for d in candidates if d.accession not in known]
     batches = [missing[i:i + size] for i in range(0, len(missing), size)]
 
@@ -504,17 +524,41 @@ def _answers(name: str, template: str, question: str, schema: dict, candidates: 
     return {d.accession: known[d.accession] for d in candidates if d.accession in known}
 
 
+def _compact_scores(question: str, candidates: list[Dataset]) -> dict[str, dict]:
+    """Triage scores as one list per batch; a batch whose list has the wrong length is asked again in the numbered form."""
+    version = hashlib.sha1((TRIAGE_PROMPT + TRIAGE_COMPACT_NOTE + json.dumps(TRIAGE_COMPACT_SCHEMA)).encode()).hexdigest()[:8]
+    slot = "question " + hashlib.sha1(" ".join(question.lower().split()).encode()).hexdigest()[:16]
+    kind = f"triage answers #{version}"
+    known = {} if FRESH_ANSWERS else store.cached_facts(slot, kind) or {}
+    missing = [d for d in candidates if d.accession not in known]
+    batches = [missing[i:i + TRIAGE_BATCH] for i in range(0, len(missing), TRIAGE_BATCH)]
+
+    def ask(batch: list[Dataset]) -> dict[str, dict]:
+        prompt = TRIAGE_PROMPT.replace("{question}", question).replace("{listing}", _listing(batch, TRIAGE_CHARS)) + TRIAGE_COMPACT_NOTE
+        scores = _ask(prompt, TRIAGE_COMPACT_SCHEMA, effort="low", think=False)["scores"]
+        if len(scores) != len(batch):
+            return _answers("triage", TRIAGE_PROMPT, question, TRIAGE_SCHEMA, batch, TRIAGE_BATCH, TRIAGE_CHARS, "low", think=False)
+        return {d.accession: {"n": i, "score": s} for i, (d, s) in enumerate(zip(batch, scores))}
+
+    with ThreadPoolExecutor(max_workers=len(batches) or 1) as workers:
+        known |= {k: v for part in workers.map(ask, batches) for k, v in part.items()}
+    if missing:
+        store.cache_facts(slot, kind, known)
+    return {d.accession: known[d.accession] for d in candidates if d.accession in known}
+
+
 def triage(question: str, candidates: list[Dataset], keep: int) -> list[Dataset]:
     """A cheap first ranking over the whole pool: Haiku scores titles and summary openings in parallel batches."""
     # Thinking off: in tests it changed the top 40 about as much as two thinking runs differ, at a third of the time.
-    scores = {k: v["score"] for k, v in _answers("triage", TRIAGE_PROMPT, question, TRIAGE_SCHEMA, candidates, TRIAGE_BATCH, 250, "low", think=False).items()}
+    answers = _compact_scores(question, candidates) if TRIAGE_COMPACT else _answers("triage", TRIAGE_PROMPT, question, TRIAGE_SCHEMA, candidates, TRIAGE_BATCH, TRIAGE_CHARS, "low", think=False)
+    scores = {k: v["score"] for k, v in answers.items()}
     ranked = sorted(candidates, key=lambda d: scores.get(d.accession, 0), reverse=True)
     return [d for d in ranked if scores.get(d.accession, 0) > 0][:keep]
 
 
 def screen(question: str, candidates: list[Dataset]) -> dict[str, dict]:
     """Haiku answers the four checks for every candidate, with a reason and a quoted phrase, in small parallel batches."""
-    return _answers("screen", SCREEN_PROMPT, question, SCREEN_SCHEMA, candidates, SCREEN_BATCH, 1500, "medium")
+    return _answers("screen", SCREEN_PROMPT, question, SCREEN_SCHEMA, candidates, SCREEN_BATCH, SCREEN_CHARS, "medium")
 
 
 def relevant(candidates: list[Dataset], verdicts: dict[str, dict]) -> list[Dataset]:
@@ -658,23 +702,41 @@ def bundles(hits: list[dict]) -> list[list[dict]]:
 
 def run(question: str, limit: int = KEEP, progress=lambda stage, data: None) -> dict:
     """The whole search: plan, gather wide, screen, count samples for survivors, grade, bundle.
-    Shared by the CLI, API, and MCP server."""
+    Shared by the CLI, API, and MCP server. The result's `timings` gives the seconds each stage took."""
+    TRACE.clear()
+    timings: dict[str, float] = {}
+    clock = [time.monotonic()]
+
+    def stage(name: str) -> None:
+        now = time.monotonic()
+        timings[STAGE[0]] = round(timings.get(STAGE[0], 0) + now - clock[0], 1)
+        STAGE[0], clock[0] = name, now
+
+    stage("plan")
     search_plan = plan(question)
     progress("plan", search_plan)
+    stage("gather")
     pool = gather(search_plan, question)
     progress("candidates", {"count": len(pool)})
+    stage("triage")
     candidates = triage(question, pool, limit)
+    stage("prefetch")
     prefetch(candidates)
+    stage("screen")
     verdicts = screen(question, candidates)
     keep = relevant(candidates, verdicts)
     progress("screened", {"count": len(keep)})
+    stage("facts")
     add_facts(search_plan, keep)
     progress("facts", {"count": sum(1 for d in keep if d.facts)})
+    stage("grade")
     hits = grade(search_plan, keep, verdicts)
     add_papers(hits)
     for h in hits:
         h["download_plan"] = download_plan(h["accession"], h["source"], h["url"])
     groups = bundles(hits)
+    stage("done")
+    timings.pop("start", None)
     return {
         "answer": answer.pick(search_plan, hits),
         "question": question,
@@ -682,4 +744,5 @@ def run(question: str, limit: int = KEEP, progress=lambda stage, data: None) -> 
         "candidates": len(pool),
         "datasets": [{k: v for k, v in h.items() if k != "text"} for h in hits],
         "same_paper": [[h["accession"] for h in g] for g in groups],
+        "timings": timings,
     }
