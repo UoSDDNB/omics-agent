@@ -255,6 +255,8 @@ def why_matched(body: WhyIn, accession: str = Path(pattern=r"^[A-Za-z0-9][A-Za-z
 
 
 JOBS: dict[str, dict] = {}
+# OMICS_PROCESS=cached serves earlier runs only: a public server shows them but does not start new ones.
+PROCESS_LIVE = os.environ.get("OMICS_PROCESS", "live") != "cached"
 JOBS_LOCK = threading.Lock()
 
 
@@ -277,6 +279,12 @@ def process_start(topic: str = "", accession: str = Path(pattern=r"^GSE\d+$")) -
             return {"accession": accession, "stage": state["stage"], "started": False}
         if state["stage"] == "done":
             return {"accession": accession, "stage": "done", "started": False}
+        if not PROCESS_LIVE:
+            JOBS[accession] = {"stage": "error", "log": [], "result": None, "error": (
+                f"This public site shows runs that were computed beforehand. To process {accession} yourself, install "
+                f"locus and run `uv run omics process {accession}`: about 3 minutes on a laptop for a small study "
+                "(see the README, \"Process a dataset\").")}
+            return {"accession": accession, "stage": "error", "started": False}
         job = JOBS[accession] = {"stage": "plan", "log": [], "result": None, "error": None}
 
     def progress(stage: str, data) -> None:
