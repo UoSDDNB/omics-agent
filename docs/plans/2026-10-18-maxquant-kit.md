@@ -1,6 +1,6 @@
 # MaxQuant search kit for PRIDE datasets
 
-Status: asked for by Juri at 08:15 BST on 18 October 2026. Designed, not built, at the time of writing. Additive: it must not change or risk anything in the demo path.
+Status: asked for by Juri at 08:15 BST on 18 October 2026. Built on the `maxquant-kit` branch (off `main`) by 08:35 BST; see the status log. Additive: it must not change or risk anything in the demo path.
 
 ## Where the idea comes from
 
@@ -42,3 +42,11 @@ Below everything in the delivery checklist. If the submission or the demo needs 
 ## Status log
 
 - 2026-10-18 08:15 BST: spec written; no code yet.
+- 2026-10-18 08:35 BST: built, on branch `maxquant-kit` off `main`. The branch lives in its own worktree (`/home/jlw/omics-agent-maxquant`) because the demo's web app on port 3020 is `next dev` serving `/home/jlw/omics-agent-pipeline/web`, so editing files there would have hot-reloaded into the pitch.
+  - Acceptance 1 passes: `uv run python -m omics_agent.maxquant PXD000159 PXD000001 PXD001345 --out kits` writes three kits (label-free Orbitrap, TMT6plex, fractionated label-free with 8 experiments × 3 fractions), each passing `validate_mqpar` (the PRIDE Map contract re-implemented), and prints the 14 fields that differ (lcmsRunType, lfqMode, matchBetweenRuns, isobaricLabels, reporter settings, fractions, experiments, FASTA, variable modifications, run count); 41 fields are the same.
+  - Acceptance 2 passes: `shellcheck -S warning` on the 18 generated scripts is clean, `bash -n` passes. `preflight.sh` on pgx (aarch64, 121 GB total, 11 GB available with the demo services up) reports two blockers, architecture and memory, writes a `blocked` line to `progress.jsonl` and exits 1.
+  - Acceptance 3 passes: `tests/test_maxquant.py` (11 tests) covers label-free, TMT, fractions and modifications from the SDRF, reagent inference, SILAC multiplicity, the contract catching each known late failure, kit files and notices, and the refusal without an SDRF (`LookupError`, surfaced as a 404 with the message by the API).
+  - Acceptance 4 passes: `uv run pytest` 32 passed; `npm run build` and `npm run lint` pass. The demo path is untouched: `agent.py`, `process.py`, `search.tsx`, `process-panel.tsx` and the figures have no diff; `api.py` gains one route, `result-card.tsx` one action on PRIDE rows.
+  - Acceptance 5 passes: the caveat is in the kit's README.txt and preflight.sh, the README's "MaxQuant search kit" section and the row action's label text. `LICENSE.pridemap` added at the repository root; credit in README.md, the module docstring and the kit's README.txt.
+  - Acceptance 6: committed and pushed to `origin/maxquant-kit` with a PR against `main`; not merged.
+  - Not done, by design: the deep validator that parses mqpar.xml with MaxQuant's own libraries (PRIDE Map's `tools/mqpar-validate`) needs the x86-64 MaxQuant image and so cannot run here; the structural contract check is what runs. SILAC amino acids are assumed (Arg10;Lys8) because the SDRF does not name them, and the kit says so. No MCP tool for the kit yet.

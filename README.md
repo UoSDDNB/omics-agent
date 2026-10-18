@@ -121,6 +121,25 @@ The pipeline gives a wrong result, not an error, when the pairs or conditions ar
 
 Get the zip from the result row in the web app, from `GET /samplesheet/{accession}?topic=...`, or from the `get_samplesheet` MCP tool. We checked the export on 10 GEO Ribo-seq studies. All 10 samplesheets pass the pipeline's input schema. The design is in [`docs/plans/2026-10-17-samplesheet-export-design.md`](docs/plans/2026-10-17-samplesheet-export-design.md).
 
+## MaxQuant search kit
+
+For a PRIDE project with an SDRF, locus writes a zip that a researcher takes to a cluster to reprocess the raw data with MaxQuant. **The search does not run on a laptop and it does not run on the machine serving locus.** MaxQuant needs 16 GB of RAM per search and hours to days of CPU, and the published container is x86-64 only, so under [`docs/data-processing-contract.md`](docs/data-processing-contract.md) proteomics is HPC tier. locus generates and validates the kit; the user runs it.
+
+- `mqpar.xml` is filled in from the SDRF: the raw file list, experiments (one per sample, or one per mixture for a multiplexed file), fractions, labelling (`comment[label]` → label-free, TMT or iTRAQ reporter channels, or SILAC states), instrument, enzymes and the fixed and variable modifications the SDRF states. Fields the SDRF leaves empty get MaxQuant's usual defaults and are listed under "Check before running" in the README.
+- `download_fasta.sh`, `download_raw.sh`, `run_maxquant.sh`, `run_all.sh` and `preflight.sh` are resume-safe, append one JSON line per stage to `progress.jsonl`, and stop at the first failure. `preflight.sh` lists the blockers on the machine it runs on (architecture, memory, CPUs, disk, MaxQuant availability) and exits 1 instead of pretending it can proceed.
+- `submit_slurm.sh` wraps the run in a Slurm job with the memory, CPUs and walltime the search needs.
+- `README.txt` repeats the design read from the SDRF, the requirements, the exact commands and the caveat above.
+
+A project without an SDRF is refused with a message saying so; nothing is guessed, because a wrong `mqpar.xml` fails hours into a run. Before the zip is written, `mqpar.xml` is checked against the contract MaxQuant 2.0.3 enforces at run time (fields that must be present, absent, empty or sized to one another; each row is a run that died 10 to 37 minutes in). The contract and the shape of the scripts come from [PRIDE Map](https://github.com/FlynnLachendro/pridemap) (MIT, [`LICENSE.pridemap`](LICENSE.pridemap)), re-implemented here.
+
+Get the zip from a PRIDE row in the web app (**Download MaxQuant kit**) or from `GET /maxquant-kit/{accession}`. To write kits to disk and see which fields differ between projects:
+
+```sh
+uv run python -m omics_agent.maxquant PXD000159 PXD000001 PXD001345 --out kits
+```
+
+The design is in [`docs/plans/2026-10-18-maxquant-kit.md`](docs/plans/2026-10-18-maxquant-kit.md).
+
 ## Process a dataset
 
 For a GEO bulk RNA-seq study (gene activity measured by sequencing) with counted case and control samples, locus can run the laptop-tier pipeline from `docs/data-processing-contract.md` on your own machine. In plain terms: it fetches the first 2,000,000 sequencing reads of each sample from ENA (the European archive of raw reads), matches them to the known human or mouse transcripts with salmon (a fast read-counting tool) using the GENCODE reference (the standard catalogue of genes), sums the counts per gene with tximport, and tests which genes differ between the two conditions with DESeq2 (the standard statistical method for this), with apeglm shrinkage so that small, noisy fold changes are not overstated. "padj" in the outputs is the adjusted p-value: the chance a gene's change is a fluke, corrected for testing thousands of genes at once; the usual cut-off is 0.05. Reads are subsampled, so the result is a preview of the study, not a reanalysis; the manifest says so.
@@ -221,6 +240,7 @@ What a judge or a reviewer should know before trusting a result. None of these i
 | `omics_agent/agent.py` | The search: plan, gather, triage, screen, count, grade, group. The CLI, API and MCP server share it. |
 | `omics_agent/samples.py` | GEO sample records, labels and counts |
 | `omics_agent/samplesheet.py` | The nf-core/riboseq export |
+| `omics_agent/maxquant.py` | The MaxQuant search kit for PRIDE projects (generated here, run on a cluster) |
 | `omics_agent/process.py`, `deseq2.R` | The laptop-tier RNA-seq pipeline: ENA reads → salmon → counts → DESeq2 → plots |
 | `omics_agent/index.py`, `store.py` | The local index and hybrid search |
 | `omics_agent/harvest*.py`, `embed.py` | Index builders |
@@ -237,4 +257,4 @@ uv run python -m omics_agent.samplesheet
 
 ## Licence
 
-Apache 2.0 (see [`LICENSE`](LICENSE)). The web interface is built on [PRIDE Map](https://github.com/FlynnLachendro/pridemap) by Flynn Lachendro, under the MIT licence ([`web/LICENSE.pridemap`](web/LICENSE.pridemap)).
+Apache 2.0 (see [`LICENSE`](LICENSE)). The web interface is built on [PRIDE Map](https://github.com/FlynnLachendro/pridemap) by Flynn Lachendro, Charlotte Ellison, Juri Westendorf and Ahmed Dawoud, under the MIT licence ([`web/LICENSE.pridemap`](web/LICENSE.pridemap)); the MaxQuant kit's `mqpar.xml` contract and scripts are re-implemented from the same project ([`LICENSE.pridemap`](LICENSE.pridemap)).

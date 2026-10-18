@@ -4,7 +4,7 @@ import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import { ArrowUpRight, ChevronDown, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { EASE_OUT } from "@/lib/springs";
-import { SAMPLE_TYPE, repositoryName, samplesheet, type Check, type Facts, type Hit } from "@/lib/api";
+import { SAMPLE_TYPE, maxquantKit, repositoryName, samplesheet, type Check, type Facts, type Hit } from "@/lib/api";
 import { Methods, Partners, Ready } from "@/components/row-details";
 import { ProcessPanel } from "@/components/process-panel";
 
@@ -214,6 +214,7 @@ export function DatasetRow({ hit, matched, topic, selected, onSelect, branch, co
   const [partnersOpen, setPartnersOpen] = useState(false);
   const [copied, setCopied] = useState(false);
   const [sheet, setSheet] = useState<"idle" | "writing" | "failed">("idle");
+  const [kit, setKit] = useState<"idle" | "writing" | { failed: string }>("idle");
   useEffect(() => {
     if (!copied) return;
     const t = setTimeout(() => setCopied(false), 1600);
@@ -237,6 +238,19 @@ export function DatasetRow({ hit, matched, topic, selected, onSelect, branch, co
       setSheet("idle");
     } catch {
       setSheet("failed");
+    }
+  }
+  async function exportMaxquantKit() {
+    setKit("writing");
+    try {
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(await maxquantKit(hit.accession));
+      a.download = `${hit.accession}-maxquant.zip`;
+      a.click();
+      URL.revokeObjectURL(a.href);
+      setKit("idle");
+    } catch (error) {
+      setKit({ failed: error instanceof Error ? error.message : "The kit could not be written. Try again." });
     }
   }
   const samplesUrl = hit.source === "GEO" ? `https://www.ncbi.nlm.nih.gov/geo/browse/?view=samples&series=${hit.accession.slice(3)}` : hit.url;
@@ -366,6 +380,20 @@ export function DatasetRow({ hit, matched, topic, selected, onSelect, branch, co
                         : sheet === "writing"
                           ? "Writing…"
                           : "zip, with contrasts and a README"}
+                    </span>
+                  </span>
+                )}
+                {hit.source === "PRIDE" && (
+                  <span className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+                    <button type="button" onClick={exportMaxquantKit} disabled={kit === "writing"} className={cn(ACTION, "w-fit disabled:cursor-wait disabled:no-underline")}>
+                      Download MaxQuant kit
+                    </button>
+                    <span role="status" className={cn("text-xs", typeof kit === "object" ? "text-warn" : "text-muted-foreground")}>
+                      {typeof kit === "object"
+                        ? kit.failed
+                        : kit === "writing"
+                          ? "Writing…"
+                          : "zip of mqpar.xml and run scripts from the SDRF. Runs on a cluster, not here: x86-64 only, 16 GB RAM per search, hours to days."}
                     </span>
                   </span>
                 )}
