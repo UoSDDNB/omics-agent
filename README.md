@@ -50,7 +50,18 @@ uv run omics --json "..."    # machine-readable output
 
 Without an Anthropic key, locus can run on a local model served through an OpenAI-compatible API, such as vLLM. Set `LOCAL_LLM_URL` (for example `http://localhost:8000/v1`) and `LOCAL_LLM_MODEL` in `.env`. The server must support JSON-schema structured output. Results then depend on that model and have not been checked against the Claude runs in `docs/evidence/`.
 
-Without a local index, locus searches the live APIs of GEO, PRIDE and CELLxGENE only. To search all 18 repositories, build the index first.
+Without a local index, locus searches the live APIs of GEO, PRIDE and CELLxGENE only. To search all 18 repositories, download the index (about 1.8 GB) from the [data release](https://github.com/hridaya423/locus/releases/tag/data-2026-10-18):
+
+```sh
+mkdir -p data && cd data
+base=https://github.com/hridaya423/locus/releases/download/data-2026-10-18
+curl -LO $base/omics.db.gz -LO $base/vectors.npy -LO $base/vector_ids.json.gz -LO $base/pridemap.tar.gz -LO $base/SHA256SUMS
+shasum -a 256 -c SHA256SUMS
+gunzip omics.db.gz vector_ids.json.gz && tar -xzf pridemap.tar.gz && rm pridemap.tar.gz
+cd ..
+```
+
+This gives `data/omics.db` (888,335 datasets, with the PRIDE method tags and repository metadata), `data/vectors.npy` and `data/vector_ids.json` (the embeddings), and `data/pridemap/`. To rebuild them yourself instead, follow the next section.
 
 ### Build the index
 
@@ -202,7 +213,7 @@ What a judge or a reviewer should know before trusting a result. None of these i
 **Search and counts**
 
 - Sample counts are counts of sample records, not of patients. One patient can have several libraries.
-- On a machine without the local index, locus searches the live GEO, PRIDE and CELLxGENE APIs only, not all 18 repositories. The demo machine has no index.
+- On a machine without the local index, locus searches the live GEO, PRIDE and CELLxGENE APIs only, not all 18 repositories. Download the index from the data release to search all 18.
 - The first two stages of a search (candidate scoring and the four checks) are not cached, so repeating a question can rank or include datasets differently; the plan and the sample labels are cached.
 - Results on the local model (Qwen via vLLM) have not been compared with the Claude runs in `docs/evidence/`; a search takes 4–8 minutes on it.
 - Counts exist for GEO, CELLxGENE and the PRIDE projects with a curated SDRF in [bigbio/sdrf-annotated-datasets](https://github.com/bigbio/sdrf-annotated-datasets) (about 28% of PRIDE; clone it shallow into `data/sdrf/`), or an SDRF the project itself lists in PRIDE. For those, locus counts individuals, samples and runs separately and leaves pooled, QC and reference channels out; a missing individual column shows as "unknown", never as a sample count. Other PRIDE projects have no counts.
