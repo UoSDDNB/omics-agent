@@ -48,8 +48,9 @@ Measured on 19 October against the 18 October baseline (`docs/evidence/qwen/`, l
   '{"disable_any_whitespace": true}'` on vLLM, would also constrain plans; prefer the flag.
 - **Set on the API process: `OMICS_SCREEN_BATCH=2`** (accepted, variant 4). 30 screening calls of 2 candidates instead
   of 15 of 4: screen 762 → 594 s over the 9 questions, every question faster, recall and the demo rank held (GSE229705 1st).
-  Caveat: 30 concurrent calls sit at the vLLM server's concurrency ceiling (a queue of 6 was seen while the public site
-  was also searching), so under load this setting queues rather than speeds up; `OMICS_SCREEN_BATCH=3` (20 calls) is the
+  Confirmed on an idle server (q1, q2, demo): 477 s with batches of 4 against 352 s with batches of 2. Caveat: 30
+  concurrent calls sit at the vLLM server's concurrency ceiling (a queue of 6 was seen while the public site was also
+  searching), so under load this setting queues rather than speeds up; `OMICS_SCREEN_BATCH=3` (20 calls) is the
   conservative choice if the public site gets busy, unmeasured.
 - **Leave off: `OMICS_TRIAGE_COMPACT=1`** (rejected, variant 1). Triage 1508 → 260 s, but the one-list form scores more
   coarsely: recall fell to 1/7 and the returned rows overlapped the baseline by only 12–40 per question.

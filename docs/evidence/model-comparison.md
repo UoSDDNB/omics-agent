@@ -86,7 +86,11 @@ to the plan call (`fresh-plan-plangrammar/`: a repeated term in 3 of 9 plans, GS
 ## Caveats
 
 - Three questions for the planner comparison; the Gemini quota resets at about 07:40 on 20 October.
-- The vLLM server is shared with the public site. Juri was searching on it during variants 4 and the Gemini arm; the
-  affected stages are named in the run log. A quiet re-measurement of variant 3 against 4 is still owed.
+- The vLLM server is shared with the public site. Juri was searching on it during variant 4 and the Gemini arm; the
+  affected stages are named in the run log. A quiet control at 14:02–14:16 (q1, q2 and the demo, cached plans, server
+  otherwise idle) gave variant 3's configuration 477 s (triage 213, screen 250) and variant 4's 352 s (triage 175,
+  screen 163), same recall, GSE229705 1st in both (`qwen/control-v3-quiet/`, `control-v4-quiet/`).
+- Row counts vary between runs of one configuration (q2 returned 43 rows in the variant 3 run and 21 in its control),
+  so recall and the demo rank are the stable quality signals, not the number of rows.
 - Recall is against 7 sure and 3 probable picks, not the full Opus list; 2 of 7 is the bar every accepted change met.
 - Per-call API tokens and costs are recorded for Claude and Gemini calls (`cost_usd` is 0 for local and free-tier calls).
