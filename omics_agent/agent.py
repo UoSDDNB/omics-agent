@@ -574,6 +574,38 @@ SCREEN_SHORT = os.environ.get("OMICS_SCREEN_SHORT") == "1"
 SCREEN_SHORT_NOTE = " Keep each reason under 15 words and each evidence phrase under 10 words."
 
 
+# Keyed triage answers: one object with a score under each candidate's number, every key required, so the answer
+# cannot misalign or stop short; about 200 output tokens for 25 candidates against 322 for the numbered objects.
+TRIAGE_KEYED = os.environ.get("OMICS_TRIAGE_KEYED") == "1"
+TRIAGE_KEYED_NOTE = "\n\nReturn an object with one score per dataset, keyed by the dataset's number."
+
+
+def _keyed_schema(size: int) -> dict:
+    return {"type": "object", "properties": {str(i): {"type": "integer", "enum": [0, 1, 2, 3]} for i in range(size)},
+            "required": [str(i) for i in range(size)], "additionalProperties": False}
+
+
+def _keyed_scores(question: str, candidates: list[Dataset]) -> dict[str, dict]:
+    """Triage scores keyed by candidate number, one call per batch; remembered like the numbered answers."""
+    version = hashlib.sha1((TRIAGE_PROMPT + TRIAGE_KEYED_NOTE + json.dumps(_keyed_schema(TRIAGE_BATCH))).encode()).hexdigest()[:8]
+    slot = "question " + hashlib.sha1(" ".join(question.lower().split()).encode()).hexdigest()[:16]
+    kind = f"triage answers #{version}"
+    known = {} if FRESH_ANSWERS else store.cached_facts(slot, kind) or {}
+    missing = [d for d in candidates if d.accession not in known]
+    batches = [missing[i:i + TRIAGE_BATCH] for i in range(0, len(missing), TRIAGE_BATCH)]
+
+    def ask(batch: list[Dataset]) -> dict[str, dict]:
+        prompt = TRIAGE_PROMPT.replace("{question}", question).replace("{listing}", _listing(batch, TRIAGE_CHARS)) + TRIAGE_KEYED_NOTE
+        scores = _ask(prompt, _keyed_schema(len(batch)), effort="low", think=False)
+        return {d.accession: {"n": i, "score": scores[str(i)]} for i, d in enumerate(batch)}
+
+    with ThreadPoolExecutor(max_workers=len(batches) or 1) as workers:
+        known |= {k: v for part in workers.map(ask, batches) for k, v in part.items()}
+    if missing:
+        store.cache_facts(slot, kind, known)
+    return {d.accession: known[d.accession] for d in candidates if d.accession in known}
+
+
 def _listing(batch: list[Dataset], chars: int) -> str:
     return "\n\n".join(f"{n}. {d.accession} | {d.source} | {d.modality} | {d.organism}\n{d.text[:chars]}" for n, d in enumerate(batch))
 
@@ -626,7 +658,8 @@ def _compact_scores(question: str, candidates: list[Dataset]) -> dict[str, dict]
 def triage(question: str, candidates: list[Dataset], keep: int) -> list[Dataset]:
     """A cheap first ranking over the whole pool: Haiku scores titles and summary openings in parallel batches."""
     # Thinking off: in tests it changed the top 40 about as much as two thinking runs differ, at a third of the time.
-    answers = _compact_scores(question, candidates) if TRIAGE_COMPACT else _answers("triage", TRIAGE_PROMPT, question, TRIAGE_SCHEMA, candidates, TRIAGE_BATCH, TRIAGE_CHARS, "low", think=False)
+    answers = (_keyed_scores(question, candidates) if TRIAGE_KEYED else _compact_scores(question, candidates) if TRIAGE_COMPACT
+               else _answers("triage", TRIAGE_PROMPT, question, TRIAGE_SCHEMA, candidates, TRIAGE_BATCH, TRIAGE_CHARS, "low", think=False))
     scores = {k: v["score"] for k, v in answers.items()}
     ranked = sorted(candidates, key=lambda d: scores.get(d.accession, 0), reverse=True)
     return [d for d in ranked if scores.get(d.accession, 0) > 0][:keep]
