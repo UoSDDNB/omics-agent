@@ -2,6 +2,7 @@ import hashlib
 import json
 import os
 import re
+import sys
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, replace
 from pathlib import Path
@@ -144,27 +145,41 @@ client = anthropic.Anthropic()
 LOCAL_LLM_URL = os.environ.get("LOCAL_LLM_URL", "").rstrip("/")
 LOCAL_LLM_MODEL = os.environ.get("LOCAL_LLM_MODEL", "")
 LOCAL_LLM_THINK = os.environ.get("LOCAL_LLM_THINK") == "1"
+# PLAN_LLM_URL, PLAN_LLM_MODEL and PLAN_LLM_KEY send only the planning call to another OpenAI-compatible service, for
+# example Gemini's (https://generativelanguage.googleapis.com/v1beta/openai), while every other call stays local.
+# Planning is one call per question and sets the search terms, so it is where a stronger model helps most.
+PLAN_LLM_URL = os.environ.get("PLAN_LLM_URL", "").rstrip("/")
+PLAN_LLM_MODEL = os.environ.get("PLAN_LLM_MODEL", "")
+PLAN_LLM_KEY = os.environ.get("PLAN_LLM_KEY", "")
 
 
-def _ask_local(prompt: str, schema: dict, cached: str, think: bool, max_tokens: int) -> dict:
-    """The same contract as `_ask`, on a local model; the server constrains decoding to the JSON schema."""
+def _ask_openai(url: str, model: str, prompt: str, schema: dict, cached: str, max_tokens: int, key: str = "",
+                extra: dict | None = None) -> dict:
+    """One call to an OpenAI-compatible chat endpoint that constrains its answer to the JSON schema."""
     response = httpx.post(
-        f"{LOCAL_LLM_URL}/chat/completions",
+        f"{url}/chat/completions",
+        headers={"Authorization": f"Bearer {key}"} if key else {},
         json={
-            "model": LOCAL_LLM_MODEL,
+            "model": model,
             "max_tokens": max_tokens,
             "temperature": 0,
             "messages": [{"role": "user", "content": "\n\n".join(filter(None, (cached, prompt)))}],
             "response_format": {"type": "json_schema", "json_schema": {"name": "answer", "schema": schema}},
-            "chat_template_kwargs": {"enable_thinking": think and LOCAL_LLM_THINK},
+            **(extra or {}),
         },
         timeout=1800,
     )
     response.raise_for_status()
     choice = response.json()["choices"][0]
     if choice["finish_reason"] == "length":
-        raise RuntimeError("The local model ran out of tokens before finishing its answer.")
+        raise RuntimeError("The model ran out of tokens before finishing its answer.")
     return json.loads(choice["message"]["content"])
+
+
+def _ask_local(prompt: str, schema: dict, cached: str, think: bool, max_tokens: int) -> dict:
+    """The same contract as `_ask`, on a local vLLM server; `chat_template_kwargs` is a vLLM extension."""
+    return _ask_openai(LOCAL_LLM_URL, LOCAL_LLM_MODEL, prompt, schema, cached, max_tokens,
+                       extra={"chat_template_kwargs": {"enable_thinking": think and LOCAL_LLM_THINK}})
 
 
 def _ask(prompt: str, schema: dict, effort: str, model: str = WORKER, cached: str = "", think: bool = True, max_tokens: int = 16000) -> dict:
@@ -235,6 +250,13 @@ matched_assays: when the question needs several assays from the same samples (fo
 
 
 def _plan(question: str) -> dict:
+    if PLAN_LLM_URL:
+        try:
+            return _ask_openai(PLAN_LLM_URL, PLAN_LLM_MODEL, f"Research question:\n{question}", PLAN_SCHEMA,
+                               PLAN_PROMPT.format(vocabulary="; ".join(cellxgene_diseases())), 16000, key=PLAN_LLM_KEY)
+        except (httpx.HTTPError, ValueError, KeyError) as error:
+            # A free hosted tier can be busy (503) or rate-limited (429); the search still runs, planned locally.
+            print(f"planning service failed ({error}); planning on the default model", file=sys.stderr)
     return _ask(
         f"Research question:\n{question}",
         PLAN_SCHEMA,
