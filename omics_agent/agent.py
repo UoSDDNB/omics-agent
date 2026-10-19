@@ -151,6 +151,11 @@ LOCAL_LLM_THINK = os.environ.get("LOCAL_LLM_THINK") == "1"
 PLAN_LLM_URL = os.environ.get("PLAN_LLM_URL", "").rstrip("/")
 PLAN_LLM_MODEL = os.environ.get("PLAN_LLM_MODEL", "")
 PLAN_LLM_KEY = os.environ.get("PLAN_LLM_KEY", "")
+# ANSWER_LLM_URL, ANSWER_LLM_MODEL and ANSWER_LLM_KEY send the batched triage and screening calls to an OpenAI-compatible
+# service the same way. Any batch it refuses (busy, rate-limited) is asked of the default model instead.
+ANSWER_LLM_URL = os.environ.get("ANSWER_LLM_URL", "").rstrip("/")
+ANSWER_LLM_MODEL = os.environ.get("ANSWER_LLM_MODEL", "")
+ANSWER_LLM_KEY = os.environ.get("ANSWER_LLM_KEY", "")
 
 
 def _ask_openai(url: str, model: str, prompt: str, schema: dict, cached: str, max_tokens: int, key: str = "",
@@ -507,8 +512,10 @@ Candidate datasets:
 
 For every numbered candidate, give a one-sentence reason a non-expert can follow, then answer the four checks from its text. Answer 'unclear' when the text does not say. For evidence, copy one short exact phrase from that candidate's text that supports the checks."""
 
-TRIAGE_BATCH = 25
-SCREEN_BATCH = 4
+# Datasets per triage and screening call. A hosted model answers a large batch as fast as a small one, and fewer calls
+# keep a free tier under its per-minute limit; the local model is quickest with the small defaults.
+TRIAGE_BATCH = int(os.environ.get("OMICS_TRIAGE_BATCH") or 25)
+SCREEN_BATCH = int(os.environ.get("OMICS_SCREEN_BATCH") or 4)
 
 
 def _listing(batch: list[Dataset], chars: int) -> str:
@@ -528,7 +535,14 @@ def _answers(name: str, template: str, question: str, schema: dict, candidates: 
 
     def ask(batch: list[Dataset]) -> dict[str, dict]:
         prompt = template.replace("{question}", question).replace("{listing}", _listing(batch, chars))
-        return {batch[a["n"]].accession: a for a in _ask(prompt, schema, effort=effort, think=think)["answers"] if 0 <= a["n"] < len(batch)}
+        reply = None
+        if ANSWER_LLM_URL:
+            try:
+                reply = _ask_openai(ANSWER_LLM_URL, ANSWER_LLM_MODEL, prompt, schema, "", 16000, key=ANSWER_LLM_KEY)
+            except (httpx.HTTPError, ValueError, KeyError) as error:
+                print(f"{name} service failed ({str(error)[:120]}); asking the default model", file=sys.stderr)
+        reply = reply or _ask(prompt, schema, effort=effort, think=think)
+        return {batch[a["n"]].accession: a for a in reply["answers"] if 0 <= a["n"] < len(batch)}
 
     with ThreadPoolExecutor(max_workers=len(batches) or 1) as workers:
         known |= {k: v for part in workers.map(ask, batches) for k, v in part.items()}
