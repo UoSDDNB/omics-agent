@@ -35,3 +35,16 @@ about 5 min, about 1.5 GB, 2 GB; labelled a lower-fidelity approximation of the 
 (nf-core/riboseq kit; about 8 h, 64 GB per job, 63 GB; "STAR against the human genome needs about 32 GB of memory").
 The results view showed the ΔTE scatter with its caption, the summary sentences, the downloads and the tool versions.
 No console errors.
+
+## The same panel on a single-nucleus dataset (GSE229253)
+
+At 23:21 BST the script ran "Single-nucleus RNA-seq of tumour-adjacent normal lung and tumour in early-stage lung
+adenocarcinoma, recurrence versus no recurrence" (a fresh search had taken 401 s a few minutes earlier; this cached
+rerun took 3 s; GSE229253 ranked second, grouped with its bulk half GSE229706), opened the group, clicked **Process** on
+GSE229253 and opened the "Here, now" row (`GSE229253-rows-1280.png`, `GSE229253-rows-390.png`,
+`GSE229253-here-results-1280.png`, `GSE229253-panel.txt`). Rows shown: Here, now (QC, clustering, UMAP, markers and
+pseudobulk DE from the authors' matrices; "GEO holds per-sample matrices for 33 of 33 samples; 8 would be used, 214 MB
+to download"; 18 min, 3.8 GB, 0.1 GB), On your laptop (kb-python kit; 2.8 h, about 4 GB, 20 GB), On a cluster
+(nf-core/scrnaseq kit; 14 h, 48 GB per STARsolo task, 151 GB; "a human STARsolo index needs about 32 GB of memory").
+The results view showed the UMAP and the marker dot plot with their captions, the summary and the warnings, including
+"Samples are nested in people". No console errors.

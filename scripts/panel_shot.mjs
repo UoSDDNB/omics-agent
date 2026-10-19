@@ -30,6 +30,12 @@ console.log(`search: ${outcome} in ${((Date.now() - t0) / 1000).toFixed(0)} s`);
 await sleep(1500);
 const rows = await page.eval(`[...document.querySelectorAll('tbody[data-accession]')].flatMap(t => t.dataset.accession.split(' '))`);
 console.log(`rows: ${rows.length}; ${ACC} at ${rows.indexOf(ACC) + 1 || "not found"}: ${rows.slice(0, 8).join(" ")}`);
+// A dataset grouped with others of the same paper sits inside a group row that must be opened first.
+const grouped = await page.eval(`(() => {
+  if (document.querySelector('button[aria-label="Details of ${ACC}"]')) return false;
+  const tb = [...document.querySelectorAll('tbody[data-accession]')].find(t => t.dataset.accession.split(' ').includes('${ACC}'));
+  const b = tb && tb.querySelector('button[aria-expanded]'); if (!b) return false; b.click(); return true; })()`);
+if (grouped) await sleep(1200);
 const expanded = await page.eval(`(() => {
   const b = document.querySelector('button[aria-label="Details of ${ACC}"]'); if (!b) return false; b.click(); return true; })()`);
 if (!expanded) { console.log("row not found"); page.close(); process.exit(1); }

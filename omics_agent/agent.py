@@ -496,6 +496,10 @@ TRIAGE_COMPACT = os.environ.get("OMICS_TRIAGE_COMPACT") == "1"
 TRIAGE_COMPACT_SCHEMA = {"type": "object", "properties": {"scores": {"type": "array", "items": {"type": "integer", "enum": [0, 1, 2, 3]}}},
                          "required": ["scores"], "additionalProperties": False}
 TRIAGE_COMPACT_NOTE = "\n\nReturn one list of scores, in the same order as the numbered datasets, one score per dataset."
+# Shorter screening answers: the reason capped at 15 words and the evidence at 10, which halves the output tokens
+# that set the screening stage's wall time on the local model. Changes the prompt, so it starts its own answer cache.
+SCREEN_SHORT = os.environ.get("OMICS_SCREEN_SHORT") == "1"
+SCREEN_SHORT_NOTE = " Keep each reason under 15 words and each evidence phrase under 10 words."
 
 
 def _listing(batch: list[Dataset], chars: int) -> str:
@@ -558,7 +562,8 @@ def triage(question: str, candidates: list[Dataset], keep: int) -> list[Dataset]
 
 def screen(question: str, candidates: list[Dataset]) -> dict[str, dict]:
     """Haiku answers the four checks for every candidate, with a reason and a quoted phrase, in small parallel batches."""
-    return _answers("screen", SCREEN_PROMPT, question, SCREEN_SCHEMA, candidates, SCREEN_BATCH, SCREEN_CHARS, "medium")
+    template = SCREEN_PROMPT + SCREEN_SHORT_NOTE if SCREEN_SHORT else SCREEN_PROMPT
+    return _answers("screen", template, question, SCREEN_SCHEMA, candidates, SCREEN_BATCH, SCREEN_CHARS, "medium")
 
 
 def relevant(candidates: list[Dataset], verdicts: dict[str, dict]) -> list[Dataset]:
