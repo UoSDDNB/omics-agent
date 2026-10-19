@@ -433,9 +433,13 @@ def _workbench_facts(dataset: Dataset) -> None:
 
 
 def _fetch_samples(dataset: Dataset) -> None:
-    """Warm the on-disk sample cache: Gemma's curated groups if they exist, else the GEO sample records."""
-    if dataset.source == "GEO" and not samples.gemma_fields(dataset.accession):
-        samples.geo_fields(dataset.accession)
+    """Warm the on-disk sample cache: Gemma's curated groups if they exist, else the GEO sample records.
+    A fetch that still fails after the retries leaves that dataset without sample counts; it does not end the search."""
+    try:
+        if dataset.source == "GEO" and not samples.gemma_fields(dataset.accession):
+            samples.geo_fields(dataset.accession)
+    except httpx.HTTPError as e:
+        print(f"samples for {dataset.accession} not fetched: {e}", flush=True)
 
 
 def prefetch(pool: list[Dataset]) -> None:
@@ -466,8 +470,14 @@ def add_facts(search_plan: dict, candidates: list[Dataset]) -> None:
     with ThreadPoolExecutor(max_workers=10) as workers:
         list(workers.map(_fetch_samples, geo))
     # Fetching is rate-limited; labelling is not, so every labelling call runs at once.
+    def geo_facts(d: Dataset) -> None:
+        try:
+            _geo_facts(topic, d)
+        except httpx.HTTPError as e:
+            print(f"facts for {d.accession} skipped: {e}", flush=True)
+
     with ThreadPoolExecutor(max_workers=len(geo) + len(pride) or 1) as workers:
-        list(workers.map(lambda d: _geo_facts(topic, d), geo))
+        list(workers.map(geo_facts, geo))
         list(workers.map(lambda d: _sdrf_facts(topic, d), pride))
     workbench = [d for d in candidates if d.source in ("MetabolomicsWorkbench", "MetaboLights")][:MAX_FACTS]
     with ThreadPoolExecutor(max_workers=8) as workers:
