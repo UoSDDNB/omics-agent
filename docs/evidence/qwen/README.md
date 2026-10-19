@@ -1,5 +1,7 @@
 # Qwen search profiling, 18–19 October 2026
 
+The 19 October decisions and numbers are summarised in `../model-comparison.md` and in the run directory's ledger (`~/hillclimb/locus-modalities-20261019/ledger.tsv`).
+
 Model: Qwen3.8-27B (FP8) served by vLLM on pgx (`LOCAL_LLM_URL`, thinking off). Index: the full local index
 (888,335 datasets). Script: `scripts/qwen_baseline.py`; comparison: `scripts/qwen_compare.py`.
 
@@ -11,6 +13,13 @@ ranks of GSE229705 and GSE229253) and `summary.md` (the table).
 |---|---|---|
 | `baseline/` | The 8 harness questions and the demo-study question, triage and screen answers asked afresh (`OMICS_FRESH_ANSWERS=1`), plans and labels cached as in the app | 21:55–23:12 BST; questions 3, 6 and 7 overlapped with other model users (a browser search and two pipeline builders), so their times are inflated |
 | `compact-short/` | q1, q2, q3, q7 and the demo with `OMICS_TRIAGE_COMPACT=1 OMICS_SCREEN_SHORT=1` | 23:21–23:41 BST, quiet server; plans and labels cached from the baseline |
+| `probe.json` | 19 Oct, idle server: output tokens per prompt shape and per-stream decode rate against concurrency (`scripts/qwen_probe.py`) |
+| `v1-triage-compact/` | 19 Oct: `OMICS_TRIAGE_COMPACT=1` with the list length fixed by the schema, all 9 questions, cached plans. Rejected: recall 1/7 |
+| `v2-compact-json/` | 19 Oct: no-whitespace grammar, q1–q3 only, stopped: the grammar let the model close answer lists early (54/48/57 of 60 screen answers) |
+| `v3-compact-json-sized/` | 19 Oct: no-whitespace grammar with answer lists fixed to the batch size, all 9 questions, cached plans. **Accepted** |
+| `v4-screen-batch-2/` | 19 Oct: variant 3 + `OMICS_SCREEN_BATCH=2`, all 9 questions, cached plans. **Accepted** (public-site load during its triage) |
+| `fresh-plan-plangrammar/` | 19 Oct: fresh Qwen plans under the grammar (q1–q3 own run; q4–demo from the Gemini arm's fallback): plans repeated or lost terms, so the plan schema left the grammar route |
+| `fresh-plan/` | 19 Oct: **the final configuration with cold caches**, all 9 questions (`LOCAL_LLM_COMPACT_JSON=1` for triage, screen and labels; `OMICS_SCREEN_BATCH=2`; plans pretty-printed). The Qwen arm of `../model-comparison.md` |
 | `baseline-quiet/` | q1, q2, q7 and the demo with the baseline configuration again | after 23:42 BST, quiet server; the run-to-run noise control |
 
 Recall is against the Opus 5.5 picks that this repository names (`progress.md`, `docs/evaluation.md`,
