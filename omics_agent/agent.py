@@ -12,7 +12,8 @@ import httpx
 from . import answer, assay, compare, index, methods, samples, samplesheet, sdrf, store
 from .sources import Dataset, cellxgene_diseases, download_plan, search_cellxgene, search_geo, search_pride
 
-PLANNER = "claude-sonnet-5-5"
+# OMICS_PLANNER_MODEL swaps the planner, for example to claude-haiku-5-5 so a whole search runs on Haiku.
+PLANNER = os.environ.get("OMICS_PLANNER_MODEL") or "claude-sonnet-5-5"
 WORKER = "claude-haiku-5-5"
 # How many triaged candidates are screened, and how many GEO datasets get their samples counted. In tests on five
 # questions, ranks 41-60 still passed the screen at close to the rate of ranks 1-40 on rich topics (IPF: 12 of 20,
@@ -174,7 +175,7 @@ def _ask(prompt: str, schema: dict, effort: str, model: str = WORKER, cached: st
     if LOCAL_LLM_URL:
         return _ask_local(prompt, schema, cached, think, max_tokens)
     # Sonnet can route a safety decline to a fallback model; Haiku has no server-side fallback.
-    fallback = {"betas": ["server-side-fallback-2026-07-01"], "fallbacks": "default"} if model == PLANNER else {}
+    fallback = {"betas": ["server-side-fallback-2026-07-01"], "fallbacks": "default"} if model.startswith("claude-sonnet") else {}
     response = client.beta.messages.create(
         model=model,
         max_tokens=max_tokens,
