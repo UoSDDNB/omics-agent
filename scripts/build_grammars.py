@@ -20,6 +20,9 @@ SCHEMAS = {
     "labels": samples.LABEL_SCHEMA,
     "explain": explain.EXPLAIN_SCHEMA,
     **{f"triage compact {n}": agent._compact_schema(n) for n in range(1, agent.TRIAGE_BATCH + 1)},
+    # The numbered forms are sent with the batch's size fixed, for every batch size up to the larger batch setting.
+    **{f"triage x{n}": agent._sized(agent.TRIAGE_SCHEMA, n) for n in range(1, max(agent.TRIAGE_BATCH, agent.SCREEN_BATCH) + 1)},
+    **{f"screen x{n}": agent._sized(agent.SCREEN_SCHEMA, n) for n in range(1, max(agent.TRIAGE_BATCH, agent.SCREEN_BATCH) + 1)},
 }
 
 

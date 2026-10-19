@@ -133,6 +133,13 @@ def _numbered(properties: dict) -> dict:
     }
 
 
+def _sized(schema: dict, size: int) -> dict:
+    """A numbered schema whose answers list must hold exactly `size` answers, one per candidate in the batch. Without
+    it, the local model closed the list early in about one batch in ten when its answer could not be pretty-printed."""
+    answers = schema["properties"]["answers"] | {"minItems": size, "maxItems": size}
+    return schema | {"properties": schema["properties"] | {"answers": answers}}
+
+
 TRIAGE_SCHEMA = _numbered({"score": {"type": "integer", "enum": [0, 1, 2, 3]}})
 # The written reason comes first so the checks follow from it; answers without it were inconsistent.
 SCREEN_SCHEMA = _numbered({"reason": {"type": "string"}} | CHECKS | {"evidence": {"type": "string"}})
@@ -558,7 +565,7 @@ def _answers(name: str, template: str, question: str, schema: dict, candidates: 
 
     def ask(batch: list[Dataset]) -> dict[str, dict]:
         prompt = template.replace("{question}", question).replace("{listing}", _listing(batch, chars))
-        return {batch[a["n"]].accession: a for a in _ask(prompt, schema, effort=effort, think=think)["answers"] if 0 <= a["n"] < len(batch)}
+        return {batch[a["n"]].accession: a for a in _ask(prompt, _sized(schema, len(batch)), effort=effort, think=think)["answers"] if 0 <= a["n"] < len(batch)}
 
     with ThreadPoolExecutor(max_workers=len(batches) or 1) as workers:
         known |= {k: v for part in workers.map(ask, batches) for k, v in part.items()}
