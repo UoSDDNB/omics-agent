@@ -21,8 +21,9 @@ ranks of GSE229705 and GSE229253) and `summary.md` (the table).
 | `v5-triage-keyed/` | 19 Oct: variant 4 + `OMICS_TRIAGE_KEYED=1` (scores keyed by candidate number), all 9 questions, cached plans. **Accepted** |
 | `v6-screen-batch-3/` | 19 Oct: variant 5 with `OMICS_SCREEN_BATCH=3`, all 9 questions, cached plans. Rejected (screen 534 → 669 s); the measured fallback under public-site load |
 | `control-v3-quiet/`, `control-v4-quiet/` | 19 Oct 14:02–14:16, server idle: variant 3's and variant 4's configurations on q1, q2 and the demo, back to back |
+| `fresh-plan-final/` | 19 Oct 14:57–15:27: **the final configuration with cold caches**, all 9 questions (variants 3 + 4 + 5, plans pretty-printed). The headline before/after against `baseline/` |
 | `fresh-plan-plangrammar/` | 19 Oct: fresh Qwen plans under the grammar (q1–q3 own run; q4–demo from the Gemini arm's fallback): plans repeated or lost terms, so the plan schema left the grammar route |
-| `fresh-plan/` | 19 Oct: **the final configuration with cold caches**, all 9 questions (`LOCAL_LLM_COMPACT_JSON=1` for triage, screen and labels; `OMICS_SCREEN_BATCH=2`; plans pretty-printed). The Qwen arm of `../model-comparison.md` |
+| `fresh-plan/` | 19 Oct 13:21–13:59: variants 3 + 4 with cold caches, all 9 questions (`LOCAL_LLM_COMPACT_JSON=1` for triage, screen and labels; `OMICS_SCREEN_BATCH=2`; plans pretty-printed). The Qwen arm of `../model-comparison.md` |
 | `baseline-quiet/` | q1, q2, q7 and the demo with the baseline configuration again | after 23:42 BST, quiet server; the run-to-run noise control |
 
 Recall is against the Opus 5.5 picks that this repository names (`progress.md`, `docs/evaluation.md`,

@@ -70,12 +70,13 @@ is the clean comparison: cold plan cache, cold answers, the final configuration.
 | variant 4: + screen batches of 2, cached plans (public-site load during triage) | 1493 | 0 | 784 | 594 | 66 | 2/7 | 1, 10 | 45, 50, 51, 50, 36, 51, 60, 60, 40 |
 | variant 5: + keyed triage scores, cached plans | 1115 | 0 | 344 | 534 | 189 | 2/7 | 1, 12 | 55, 43, 52, 51, 42, 53, 60, 58, 37 |
 | **variants 3 + 4, cold caches (the fresh-Qwen arm, 19 Oct 13:21–13:59; before variant 5)** | **2252** | 721 | 682 | 536 | 251 | 2/7 | 1, 9 | 48, 51, 46, 48, 43, 52, 58, 60, 34 |
+| **final configuration (variants 3 + 4 + 5), cold caches (`qwen/fresh-plan-final/`, 19 Oct 14:57–15:27)** | **1860** | 743 | 327 | 553 | 193 | 2/7 | 1, 10 | 52, 44, 51, 52, 36, 53, 60, 60, 42 |
 
-Over the nine questions, cold caches to cold caches: wall 4665 → 2252 s, triage 1508 → 682 s, screen 1360 → 536 s,
-planning unchanged (909 → 721 s; the plan call stays pretty-printed on purpose), recall 2/7 → 2/7 with the same
-two picks (GSE35469, GSE69352), demo study 1st in both. Facts 822 → 251 s is not a like-for-like number: today's run
-found most labels cached from earlier runs. Of today's nine fresh Qwen plans, eight have the same search terms as the
-18 October plans, so the candidate pools match and the speed numbers compare the same searches.
+Over the nine questions, cold caches to cold caches, 18 October against the final configuration: wall 4665 → 1860 s,
+planning 909 → 743 s (the plan call stays pretty-printed on purpose; all nine fresh plans have the 18 October search
+terms, so the candidate pools match), triage 1508 → 327 s, screen 1360 → 553 s, recall 2/7 → 2/7 with
+the same two picks (GSE35469 5th, GSE69352 26th), demo study 1st in both (GSE229253 15th → 10th). Facts
+822 → 193 s is not a like-for-like number: today's runs found most labels cached from earlier runs.
 
 Where the time went and what changed: vLLM pretty-prints every schema-constrained answer, and on this server a stage's
 wall time is its longest call's output tokens at about 5 tokens/s. Sending a no-whitespace grammar instead of the schema
