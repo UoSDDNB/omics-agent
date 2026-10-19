@@ -38,18 +38,26 @@ Measured on 19 October against the 18 October baseline (`docs/evidence/qwen/`, l
 
 - **Set on the API process: `LOCAL_LLM_COMPACT_JSON=1`** (accepted, variant 3). vLLM pretty-prints every
   schema-constrained answer, and on pgx the output tokens set a stage's wall time. With this flag the agent sends the
-  server an EBNF grammar that allows no newlines or indentation (built from each schema by `scripts/build_grammars.py`
-  into `omics_agent/grammars.json`; rebuild it with `uv run --with xgrammar python scripts/build_grammars.py` whenever a
-  schema changes, a schema without a grammar falls back to the schema). Over the 9 harness questions: triage 1508 → 549 s,
-  screen 1360 → 762 s, wall after planning 3756 → 1440 s; recall on the sure Opus picks 2/7 as before; the demo study
-  GSE229705 ranked 3rd (1st before, all top rows graded strong). The prompts do not change, so remembered answers stay valid.
-  The same effect server-wide without the flag: start vLLM with `--structured-outputs-config '{"disable_any_whitespace": true}'`
-  (not done tonight; the server was not restarted).
+  server an EBNF grammar that allows no newlines or indentation, for the triage, screening and labelling schemas (built by
+  `scripts/build_grammars.py` into `omics_agent/grammars.json`; rebuild with `uv run --with xgrammar python
+  scripts/build_grammars.py` whenever a schema changes; a schema without a grammar falls back to the schema). The plan
+  schema is left out on purpose: under the grammar Qwen's plans repeated or lost search terms. Over the 9 harness
+  questions with cached plans: triage 1508 → 549 s, screen 1360 → 762 s, wall after planning 3756 → 1440 s; recall on the
+  sure Opus picks 2/7 as before; the demo study GSE229705 3rd (1st before; all top rows graded strong). The prompts do not
+  change, so remembered answers stay valid. The server-wide alternative, `--structured-outputs-config
+  '{"disable_any_whitespace": true}'` on vLLM, would also constrain plans; prefer the flag.
+- **Set on the API process: `OMICS_SCREEN_BATCH=2`** (accepted, variant 4). 30 screening calls of 2 candidates instead
+  of 15 of 4: screen 762 → 594 s over the 9 questions, every question faster, recall and the demo rank held (GSE229705 1st).
+  Caveat: 30 concurrent calls sit at the vLLM server's concurrency ceiling (a queue of 6 was seen while the public site
+  was also searching), so under load this setting queues rather than speeds up; `OMICS_SCREEN_BATCH=3` (20 calls) is the
+  conservative choice if the public site gets busy, unmeasured.
 - **Leave off: `OMICS_TRIAGE_COMPACT=1`** (rejected, variant 1). Triage 1508 → 260 s, but the one-list form scores more
   coarsely: recall fell to 1/7 and the returned rows overlapped the baseline by only 12–40 per question.
 - **Leave off: `OMICS_SCREEN_SHORT=1`** (not run as a full variant; in single-call probes the note changed verdicts).
-- `OMICS_SCREEN_BATCH`, `OMICS_TRIAGE_BATCH`, `OMICS_SCREEN_CHARS`, `OMICS_TRIAGE_CHARS`: see the ledger for any batch
-  variant measured after variant 3.
+- **Planning on Gemini: `PLAN_LLM_URL`, `PLAN_LLM_MODEL=gemini-flash-latest`, `PLAN_LLM_KEY`** (from `deploy-public`,
+  merged here). Gemini plans a question in 10–13 s against 58–129 s on Qwen; the free tier allows 20 requests a day per
+  model, after which the agent falls back to Qwen planning and prints a line to stderr. See
+  `docs/evidence/model-comparison.md` for the measured comparison.
 - `OMICS_FRESH_ANSWERS=1` is for measurements only: it ignores remembered answers and must not be set in production.
 - Robustness fix shipped with this work: a GEO `acc.cgi` server error or dropped connection is retried, and a series whose
   sample records still cannot be fetched is returned without sample counts instead of ending the search (GEO was down for
