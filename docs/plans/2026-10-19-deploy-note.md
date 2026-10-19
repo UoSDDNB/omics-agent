@@ -51,7 +51,8 @@ Measured on 19 October against the 18 October baseline (`docs/evidence/qwen/`, l
   Confirmed on an idle server (q1, q2, demo): 477 s with batches of 4 against 352 s with batches of 2. Caveat: 30
   concurrent calls sit at the vLLM server's concurrency ceiling (a queue of 6 was seen while the public site was also
   searching), so under load this setting queues rather than speeds up; `OMICS_SCREEN_BATCH=3` (20 calls) is the
-  conservative choice if the public site gets busy, unmeasured.
+  conservative choice if the public site gets busy: measured as variant 6, screening 669 s against 534 s over the 9
+  questions on a quiet server, same recall and demo rank.
 - **Set on the API process: `OMICS_TRIAGE_KEYED=1`** (accepted, variant 5). Triage scores come back as one object with
   a score under each candidate's number, every key required (167 output tokens a call against 322): triage 784 → 344 s
   over the 9 questions on top of variant 4, recall 2/7 held (GSE35469 11th, GSE69352 25th), GSE229705 1st. The answer
