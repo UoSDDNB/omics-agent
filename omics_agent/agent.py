@@ -2,6 +2,7 @@ import hashlib
 import json
 import os
 import re
+import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, replace
@@ -160,43 +161,60 @@ LOCAL_LLM_THINK = os.environ.get("LOCAL_LLM_THINK") == "1"
 LOCAL_LLM_COMPACT_JSON = os.environ.get("LOCAL_LLM_COMPACT_JSON") == "1"
 GRAMMARS_FILE = Path(__file__).with_name("grammars.json")
 GRAMMARS: dict[str, str] = json.loads(GRAMMARS_FILE.read_text()) if LOCAL_LLM_COMPACT_JSON and GRAMMARS_FILE.exists() else {}
-
-
-def schema_key(schema: dict) -> str:
-    return hashlib.sha1(json.dumps(schema, sort_keys=True).encode()).hexdigest()[:16]
+# PLAN_LLM_URL, PLAN_LLM_MODEL and PLAN_LLM_KEY send only the planning call to another OpenAI-compatible service, for
+# example Gemini's (https://generativelanguage.googleapis.com/v1beta/openai), while every other call stays local.
+# Planning is one call per question and sets the search terms, so it is where a stronger model helps most.
+PLAN_LLM_URL = os.environ.get("PLAN_LLM_URL", "").rstrip("/")
+PLAN_LLM_MODEL = os.environ.get("PLAN_LLM_MODEL", "")
+PLAN_LLM_KEY = os.environ.get("PLAN_LLM_KEY", "")
 # OMICS_FRESH_ANSWERS=1 ignores remembered triage and screen answers, so a timing run measures real model calls.
 FRESH_ANSWERS = os.environ.get("OMICS_FRESH_ANSWERS") == "1"
-# Every model call, local or API, is recorded here (stage, seconds, tokens in and out; for the API also the model and
-# the cached tokens read and written) so a run can be profiled; `run` resets it.
+# Every model call, local, planning service or Claude, is recorded here (stage, seconds, model, tokens in and out;
+# for Claude also the cached tokens read and written) so a run can be profiled; `run` resets it.
 TRACE: list[dict] = []
 STAGE = ["start"]
 
 
-def _ask_local(prompt: str, schema: dict, cached: str, think: bool, max_tokens: int) -> dict:
-    """The same contract as `_ask`, on a local model; the server constrains decoding to the JSON schema."""
+def schema_key(schema: dict) -> str:
+    return hashlib.sha1(json.dumps(schema, sort_keys=True).encode()).hexdigest()[:16]
+
+
+def _ask_openai(url: str, model: str, prompt: str, schema: dict, cached: str, max_tokens: int, key: str = "",
+                extra: dict | None = None) -> dict:
+    """One call to an OpenAI-compatible chat endpoint that constrains its answer to the JSON schema, or to a grammar
+    when `extra` carries one (vLLM's `structured_outputs`)."""
     started = time.monotonic()
     response = httpx.post(
-        f"{LOCAL_LLM_URL}/chat/completions",
+        f"{url}/chat/completions",
+        headers={"Authorization": f"Bearer {key}"} if key else {},
         json={
-            "model": LOCAL_LLM_MODEL,
+            "model": model,
             "max_tokens": max_tokens,
             "temperature": 0,
             "messages": [{"role": "user", "content": "\n\n".join(filter(None, (cached, prompt)))}],
-            **({"structured_outputs": {"grammar": grammar}} if (grammar := GRAMMARS.get(schema_key(schema))) else
+            **({} if "structured_outputs" in (extra or {}) else
                {"response_format": {"type": "json_schema", "json_schema": {"name": "answer", "schema": schema}}}),
-            "chat_template_kwargs": {"enable_thinking": think and LOCAL_LLM_THINK},
+            **(extra or {}),
         },
         timeout=1800,
     )
     response.raise_for_status()
     body = response.json()
     usage = body.get("usage") or {}
-    TRACE.append({"stage": STAGE[0], "seconds": round(time.monotonic() - started, 2), "tokens_in": usage.get("prompt_tokens", 0),
-                  "tokens_out": usage.get("completion_tokens", 0), "max_tokens": max_tokens})
+    TRACE.append({"stage": STAGE[0], "seconds": round(time.monotonic() - started, 2), "model": body.get("model") or model,
+                  "tokens_in": usage.get("prompt_tokens", 0), "tokens_out": usage.get("completion_tokens", 0), "max_tokens": max_tokens})
     choice = body["choices"][0]
     if choice["finish_reason"] == "length":
-        raise RuntimeError("The local model ran out of tokens before finishing its answer.")
+        raise RuntimeError("The model ran out of tokens before finishing its answer.")
     return json.loads(choice["message"]["content"])
+
+
+def _ask_local(prompt: str, schema: dict, cached: str, think: bool, max_tokens: int) -> dict:
+    """The same contract as `_ask`, on a local vLLM server; `chat_template_kwargs` is a vLLM extension."""
+    grammar = GRAMMARS.get(schema_key(schema))
+    return _ask_openai(LOCAL_LLM_URL, LOCAL_LLM_MODEL, prompt, schema, cached, max_tokens,
+                       extra={"chat_template_kwargs": {"enable_thinking": think and LOCAL_LLM_THINK},
+                              **({"structured_outputs": {"grammar": grammar}} if grammar else {})})
 
 
 def _ask(prompt: str, schema: dict, effort: str, model: str = WORKER, cached: str = "", think: bool = True, max_tokens: int = 16000) -> dict:
@@ -273,6 +291,13 @@ matched_assays: when the question needs several assays from the same samples (fo
 
 
 def _plan(question: str) -> dict:
+    if PLAN_LLM_URL:
+        try:
+            return _ask_openai(PLAN_LLM_URL, PLAN_LLM_MODEL, f"Research question:\n{question}", PLAN_SCHEMA,
+                               PLAN_PROMPT.format(vocabulary="; ".join(cellxgene_diseases())), 16000, key=PLAN_LLM_KEY)
+        except (httpx.HTTPError, ValueError, KeyError) as error:
+            # A free hosted tier can be busy (503) or rate-limited (429); the search still runs, planned locally.
+            print(f"planning service failed ({error}); planning on the default model", file=sys.stderr)
     return _ask(
         f"Research question:\n{question}",
         PLAN_SCHEMA,
