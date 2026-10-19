@@ -52,6 +52,10 @@ Measured on 19 October against the 18 October baseline (`docs/evidence/qwen/`, l
   concurrent calls sit at the vLLM server's concurrency ceiling (a queue of 6 was seen while the public site was also
   searching), so under load this setting queues rather than speeds up; `OMICS_SCREEN_BATCH=3` (20 calls) is the
   conservative choice if the public site gets busy, unmeasured.
+- **Set on the API process: `OMICS_TRIAGE_KEYED=1`** (accepted, variant 5). Triage scores come back as one object with
+  a score under each candidate's number, every key required (167 output tokens a call against 322): triage 784 → 344 s
+  over the 9 questions on top of variant 4, recall 2/7 held (GSE35469 11th, GSE69352 25th), GSE229705 1st. The answer
+  cache key differs from the numbered form's, so the first search on each remembered question asks triage afresh.
 - **Leave off: `OMICS_TRIAGE_COMPACT=1`** (rejected, variant 1). Triage 1508 → 260 s, but the one-list form scores more
   coarsely: recall fell to 1/7 and the returned rows overlapped the baseline by only 12–40 per question.
 - **Leave off: `OMICS_SCREEN_SHORT=1`** (not run as a full variant; in single-call probes the note changed verdicts).

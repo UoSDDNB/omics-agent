@@ -7,7 +7,7 @@ demo-study question), in-process on pgx with `scripts/qwen_baseline.py`. Numbers
 1. **Planner:** Gemini (`gemini-flash-latest`, free tier) planning with Qwen doing the rest, against Qwen planning afresh.
    Juri's 11:51 decision replaced the Haiku arm with this one because no Anthropic key exists.
 2. **Qwen speed:** the 18 October baseline against the configuration accepted today (`LOCAL_LLM_COMPACT_JSON=1`,
-   `OMICS_SCREEN_BATCH=2`), measured with cold caches.
+   `OMICS_SCREEN_BATCH=2`, and from variant 5 on `OMICS_TRIAGE_KEYED=1`), measured with cold caches for the first two.
 
 Model: Qwen3.8-27B FP8 on vLLM 0.29 (pgx, GB10, `--enforce-eager`, thinking off), decoding about 5–7 tokens/s per
 stream. Recall is against the Opus 5.5 picks this repository names (7 "sure", 3 "probable"; the full list of 34 is not
@@ -68,7 +68,8 @@ is the clean comparison: cold plan cache, cold answers, the final configuration.
 | baseline, 18 Oct (plans computed in the run, pretty-printed answers, screen batches of 4) | 4665 | 909 | 1508 | 1360 | 822 | 2/7 | 1, 15 | 44, 39, 51, 53, 40, 43, 60, 56, 48 |
 | variant 3: no-whitespace grammar, cached plans | 1440 | 0 | 549 | 762 | 85 | 2/7 | 3, 16 | 42, 43, 51, 46, 39, 52, 60, 60, 39 |
 | variant 4: + screen batches of 2, cached plans (public-site load during triage) | 1493 | 0 | 784 | 594 | 66 | 2/7 | 1, 10 | 45, 50, 51, 50, 36, 51, 60, 60, 40 |
-| **final configuration, cold caches (the fresh-Qwen arm, 19 Oct 13:21–13:59)** | **2252** | 721 | 682 | 536 | 251 | 2/7 | 1, 9 | 48, 51, 46, 48, 43, 52, 58, 60, 34 |
+| variant 5: + keyed triage scores, cached plans | 1115 | 0 | 344 | 534 | 189 | 2/7 | 1, 12 | 55, 43, 52, 51, 42, 53, 60, 58, 37 |
+| **variants 3 + 4, cold caches (the fresh-Qwen arm, 19 Oct 13:21–13:59; before variant 5)** | **2252** | 721 | 682 | 536 | 251 | 2/7 | 1, 9 | 48, 51, 46, 48, 43, 52, 58, 60, 34 |
 
 Over the nine questions, cold caches to cold caches: wall 4665 → 2252 s, triage 1508 → 682 s, screen 1360 → 536 s,
 planning unchanged (909 → 721 s; the plan call stays pretty-printed on purpose), recall 2/7 → 2/7 with the same
@@ -79,7 +80,7 @@ found most labels cached from earlier runs. Of today's nine fresh Qwen plans, ei
 Where the time went and what changed: vLLM pretty-prints every schema-constrained answer, and on this server a stage's
 wall time is its longest call's output tokens at about 5 tokens/s. Sending a no-whitespace grammar instead of the schema
 cut triage from 554 to 322 output tokens a call and screening from about 460 to 370, with the same fields and values
-(`docs/evidence/qwen/probe.json`, `README.md`). Screening batches of 2 shorten the longest screening call further.
+(`docs/evidence/qwen/probe.json`, `README.md`). Screening batches of 2 shorten the longest screening call further, and keyed triage scores (one object, a score under each candidate's number) cut a triage call to 167 tokens with the alignment guaranteed by the required keys.
 Two things did not survive: the one-list triage format (variant 1, coarser scores, recall 1/7) and applying the grammar
 to the plan call (`fresh-plan-plangrammar/`: a repeated term in 3 of 9 plans, GSE229705 6th on the demo).
 

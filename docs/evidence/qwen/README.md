@@ -18,6 +18,8 @@ ranks of GSE229705 and GSE229253) and `summary.md` (the table).
 | `v2-compact-json/` | 19 Oct: no-whitespace grammar, q1–q3 only, stopped: the grammar let the model close answer lists early (54/48/57 of 60 screen answers) |
 | `v3-compact-json-sized/` | 19 Oct: no-whitespace grammar with answer lists fixed to the batch size, all 9 questions, cached plans. **Accepted** |
 | `v4-screen-batch-2/` | 19 Oct: variant 3 + `OMICS_SCREEN_BATCH=2`, all 9 questions, cached plans. **Accepted** (public-site load during its triage) |
+| `v5-triage-keyed/` | 19 Oct: variant 4 + `OMICS_TRIAGE_KEYED=1` (scores keyed by candidate number), all 9 questions, cached plans. **Accepted** |
+| `control-v3-quiet/`, `control-v4-quiet/` | 19 Oct 14:02–14:16, server idle: variant 3's and variant 4's configurations on q1, q2 and the demo, back to back |
 | `fresh-plan-plangrammar/` | 19 Oct: fresh Qwen plans under the grammar (q1–q3 own run; q4–demo from the Gemini arm's fallback): plans repeated or lost terms, so the plan schema left the grammar route |
 | `fresh-plan/` | 19 Oct: **the final configuration with cold caches**, all 9 questions (`LOCAL_LLM_COMPACT_JSON=1` for triage, screen and labels; `OMICS_SCREEN_BATCH=2`; plans pretty-printed). The Qwen arm of `../model-comparison.md` |
 | `baseline-quiet/` | q1, q2, q7 and the demo with the baseline configuration again | after 23:42 BST, quiet server; the run-to-run noise control |
