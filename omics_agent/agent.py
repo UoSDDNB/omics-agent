@@ -490,11 +490,19 @@ TRIAGE_BATCH = int(os.environ.get("OMICS_TRIAGE_BATCH") or 25)
 SCREEN_BATCH = int(os.environ.get("OMICS_SCREEN_BATCH") or 4)
 SCREEN_CHARS = int(os.environ.get("OMICS_SCREEN_CHARS") or 1500)
 TRIAGE_CHARS = int(os.environ.get("OMICS_TRIAGE_CHARS") or 250)
-# Compact triage answers: one list of scores in listing order instead of {n, score} objects, a tenth of the output
-# tokens. A list of the wrong length falls back to the numbered form for that batch.
+# Compact triage answers: one list of scores in listing order instead of {n, score} objects, a sixth of the output
+# tokens (about 87 against 554 for 25 candidates). Without a length constraint the model dropped one score in most
+# batches (docs/evidence/qwen/README.md), so the schema fixes the list's length to the batch's; a list of the wrong
+# length still falls back to the numbered form for that batch.
 TRIAGE_COMPACT = os.environ.get("OMICS_TRIAGE_COMPACT") == "1"
 TRIAGE_COMPACT_SCHEMA = {"type": "object", "properties": {"scores": {"type": "array", "items": {"type": "integer", "enum": [0, 1, 2, 3]}}},
                          "required": ["scores"], "additionalProperties": False}
+
+
+def _compact_schema(size: int) -> dict:
+    """The compact triage schema with exactly `size` scores."""
+    scores = TRIAGE_COMPACT_SCHEMA["properties"]["scores"] | {"minItems": size, "maxItems": size}
+    return TRIAGE_COMPACT_SCHEMA | {"properties": {"scores": scores}}
 TRIAGE_COMPACT_NOTE = "\n\nReturn one list of scores, in the same order as the numbered datasets, one score per dataset."
 # Shorter screening answers: the reason capped at 15 words and the evidence at 10, which halves the output tokens
 # that set the screening stage's wall time on the local model. Changes the prompt, so it starts its own answer cache.
@@ -530,7 +538,7 @@ def _answers(name: str, template: str, question: str, schema: dict, candidates: 
 
 def _compact_scores(question: str, candidates: list[Dataset]) -> dict[str, dict]:
     """Triage scores as one list per batch; a batch whose list has the wrong length is asked again in the numbered form."""
-    version = hashlib.sha1((TRIAGE_PROMPT + TRIAGE_COMPACT_NOTE + json.dumps(TRIAGE_COMPACT_SCHEMA)).encode()).hexdigest()[:8]
+    version = hashlib.sha1((TRIAGE_PROMPT + TRIAGE_COMPACT_NOTE + json.dumps(TRIAGE_COMPACT_SCHEMA) + " fixed length").encode()).hexdigest()[:8]
     slot = "question " + hashlib.sha1(" ".join(question.lower().split()).encode()).hexdigest()[:16]
     kind = f"triage answers #{version}"
     known = {} if FRESH_ANSWERS else store.cached_facts(slot, kind) or {}
@@ -539,7 +547,7 @@ def _compact_scores(question: str, candidates: list[Dataset]) -> dict[str, dict]
 
     def ask(batch: list[Dataset]) -> dict[str, dict]:
         prompt = TRIAGE_PROMPT.replace("{question}", question).replace("{listing}", _listing(batch, TRIAGE_CHARS)) + TRIAGE_COMPACT_NOTE
-        scores = _ask(prompt, TRIAGE_COMPACT_SCHEMA, effort="low", think=False)["scores"]
+        scores = _ask(prompt, _compact_schema(len(batch)), effort="low", think=False)["scores"]
         if len(scores) != len(batch):
             return _answers("triage", TRIAGE_PROMPT, question, TRIAGE_SCHEMA, batch, TRIAGE_BATCH, TRIAGE_CHARS, "low", think=False)
         return {d.accession: {"n": i, "score": s} for i, (d, s) in enumerate(zip(batch, scores))}
