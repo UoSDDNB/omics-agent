@@ -145,6 +145,18 @@ client = anthropic.Anthropic()
 LOCAL_LLM_URL = os.environ.get("LOCAL_LLM_URL", "").rstrip("/")
 LOCAL_LLM_MODEL = os.environ.get("LOCAL_LLM_MODEL", "")
 LOCAL_LLM_THINK = os.environ.get("LOCAL_LLM_THINK") == "1"
+# LOCAL_LLM_COMPACT_JSON=1 sends the server a grammar that allows no newlines or indentation between JSON tokens
+# instead of the schema, so an answer is not pretty-printed: the same fields and values in about a third fewer output
+# tokens, which is what sets a stage's wall time. The grammars are built from the schemas by scripts/build_grammars.py
+# (xgrammar, any_whitespace=False) into grammars.json; a schema without one falls back to the schema. The same effect
+# server-wide, without this flag, is vLLM's --structured-outputs-config disable_any_whitespace=true.
+LOCAL_LLM_COMPACT_JSON = os.environ.get("LOCAL_LLM_COMPACT_JSON") == "1"
+GRAMMARS_FILE = Path(__file__).with_name("grammars.json")
+GRAMMARS: dict[str, str] = json.loads(GRAMMARS_FILE.read_text()) if LOCAL_LLM_COMPACT_JSON and GRAMMARS_FILE.exists() else {}
+
+
+def schema_key(schema: dict) -> str:
+    return hashlib.sha1(json.dumps(schema, sort_keys=True).encode()).hexdigest()[:16]
 # OMICS_FRESH_ANSWERS=1 ignores remembered triage and screen answers, so a timing run measures real model calls.
 FRESH_ANSWERS = os.environ.get("OMICS_FRESH_ANSWERS") == "1"
 # Every model call, local or API, is recorded here (stage, seconds, tokens in and out; for the API also the model and
@@ -163,7 +175,8 @@ def _ask_local(prompt: str, schema: dict, cached: str, think: bool, max_tokens: 
             "max_tokens": max_tokens,
             "temperature": 0,
             "messages": [{"role": "user", "content": "\n\n".join(filter(None, (cached, prompt)))}],
-            "response_format": {"type": "json_schema", "json_schema": {"name": "answer", "schema": schema}},
+            **({"structured_outputs": {"grammar": grammar}} if (grammar := GRAMMARS.get(schema_key(schema))) else
+               {"response_format": {"type": "json_schema", "json_schema": {"name": "answer", "schema": schema}}}),
             "chat_template_kwargs": {"enable_thinking": think and LOCAL_LLM_THINK},
         },
         timeout=1800,
