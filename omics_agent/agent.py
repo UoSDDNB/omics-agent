@@ -147,7 +147,8 @@ LOCAL_LLM_MODEL = os.environ.get("LOCAL_LLM_MODEL", "")
 LOCAL_LLM_THINK = os.environ.get("LOCAL_LLM_THINK") == "1"
 # OMICS_FRESH_ANSWERS=1 ignores remembered triage and screen answers, so a timing run measures real model calls.
 FRESH_ANSWERS = os.environ.get("OMICS_FRESH_ANSWERS") == "1"
-# Every local-model call is recorded here (stage, seconds, tokens in and out) so a run can be profiled; `run` resets it.
+# Every model call, local or API, is recorded here (stage, seconds, tokens in and out; for the API also the model and
+# the cached tokens read and written) so a run can be profiled; `run` resets it.
 TRACE: list[dict] = []
 STAGE = ["start"]
 
@@ -187,6 +188,7 @@ def _ask(prompt: str, schema: dict, effort: str, model: str = WORKER, cached: st
         return _ask_local(prompt, schema, cached, think, max_tokens)
     # Sonnet can route a safety decline to a fallback model; Haiku has no server-side fallback.
     fallback = {"betas": ["server-side-fallback-2026-07-01"], "fallbacks": "default"} if model.startswith("claude-sonnet") else {}
+    started = time.monotonic()
     response = client.beta.messages.create(
         model=model,
         max_tokens=max_tokens,
@@ -198,6 +200,11 @@ def _ask(prompt: str, schema: dict, effort: str, model: str = WORKER, cached: st
         **fallback,
         **({} if think else {"thinking": {"type": "disabled"}}),
     )
+    usage = response.usage
+    TRACE.append({"stage": STAGE[0], "seconds": round(time.monotonic() - started, 2), "model": response.model,
+                  "tokens_in": usage.input_tokens, "tokens_out": usage.output_tokens,
+                  "cache_read": getattr(usage, "cache_read_input_tokens", 0) or 0,
+                  "cache_write": getattr(usage, "cache_creation_input_tokens", 0) or 0, "max_tokens": max_tokens})
     if response.stop_reason == "refusal":
         raise RuntimeError("The model declined the request.")
     return json.loads(next(b.text for b in response.content if b.type == "text"))
