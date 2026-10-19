@@ -156,8 +156,9 @@ LOCAL_LLM_THINK = os.environ.get("LOCAL_LLM_THINK") == "1"
 # LOCAL_LLM_COMPACT_JSON=1 sends the server a grammar that allows no newlines or indentation between JSON tokens
 # instead of the schema, so an answer is not pretty-printed: the same fields and values in about a third fewer output
 # tokens, which is what sets a stage's wall time. The grammars are built from the schemas by scripts/build_grammars.py
-# (xgrammar, any_whitespace=False) into grammars.json; a schema without one falls back to the schema. The same effect
-# server-wide, without this flag, is vLLM's --structured-outputs-config disable_any_whitespace=true.
+# (xgrammar, any_whitespace=False) into grammars.json; a schema without one falls back to the schema. The plan schema has
+# none on purpose: it is one call per question, and the constrained plans repeated or lost search terms. The same effect
+# server-wide, without this flag, is vLLM's --structured-outputs-config disable_any_whitespace=true (then also for plans).
 LOCAL_LLM_COMPACT_JSON = os.environ.get("LOCAL_LLM_COMPACT_JSON") == "1"
 GRAMMARS_FILE = Path(__file__).with_name("grammars.json")
 GRAMMARS: dict[str, str] = json.loads(GRAMMARS_FILE.read_text()) if LOCAL_LLM_COMPACT_JSON and GRAMMARS_FILE.exists() else {}

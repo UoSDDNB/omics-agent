@@ -12,8 +12,9 @@ import xgrammar as xgr
 
 from omics_agent import agent, explain, samples
 
+# The plan schema is left out on purpose: one call per question, and under the no-whitespace grammar Qwen's plans
+# repeated a search term in 3 of 9 and dropped the demo question's comparison terms (docs/evidence/qwen/fresh-plan-plangrammar/).
 SCHEMAS = {
-    "plan": agent.PLAN_SCHEMA,
     "triage": agent.TRIAGE_SCHEMA,
     "screen": agent.SCREEN_SCHEMA,
     "contrast": agent.CONTRAST_SCHEMA,
