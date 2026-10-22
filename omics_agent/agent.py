@@ -2,6 +2,7 @@ import hashlib
 import json
 import os
 import re
+import sys
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, replace
 from pathlib import Path
@@ -12,7 +13,8 @@ import httpx
 from . import answer, assay, compare, index, methods, samples, samplesheet, sdrf, store
 from .sources import Dataset, cellxgene_diseases, download_plan, search_cellxgene, search_geo, search_pride
 
-PLANNER = "claude-sonnet-5-5"
+# OMICS_PLANNER_MODEL swaps the planner, for example to claude-haiku-5-5 so a whole search runs on Haiku.
+PLANNER = os.environ.get("OMICS_PLANNER_MODEL") or "claude-sonnet-5-5"
 WORKER = "claude-haiku-5-5"
 # How many triaged candidates are screened, and how many GEO datasets get their samples counted. In tests on five
 # questions, ranks 41-60 still passed the screen at close to the rate of ranks 1-40 on rich topics (IPF: 12 of 20,
@@ -143,27 +145,46 @@ client = anthropic.Anthropic()
 LOCAL_LLM_URL = os.environ.get("LOCAL_LLM_URL", "").rstrip("/")
 LOCAL_LLM_MODEL = os.environ.get("LOCAL_LLM_MODEL", "")
 LOCAL_LLM_THINK = os.environ.get("LOCAL_LLM_THINK") == "1"
+# PLAN_LLM_URL, PLAN_LLM_MODEL and PLAN_LLM_KEY send only the planning call to another OpenAI-compatible service, for
+# example Gemini's (https://generativelanguage.googleapis.com/v1beta/openai), while every other call stays local.
+# Planning is one call per question and sets the search terms, so it is where a stronger model helps most.
+PLAN_LLM_URL = os.environ.get("PLAN_LLM_URL", "").rstrip("/")
+PLAN_LLM_MODEL = os.environ.get("PLAN_LLM_MODEL", "")
+PLAN_LLM_KEY = os.environ.get("PLAN_LLM_KEY", "")
+# ANSWER_LLM_URL, ANSWER_LLM_MODEL and ANSWER_LLM_KEY send the batched triage and screening calls to an OpenAI-compatible
+# service the same way. Any batch it refuses (busy, rate-limited) is asked of the default model instead.
+ANSWER_LLM_URL = os.environ.get("ANSWER_LLM_URL", "").rstrip("/")
+ANSWER_LLM_MODEL = os.environ.get("ANSWER_LLM_MODEL", "")
+ANSWER_LLM_KEY = os.environ.get("ANSWER_LLM_KEY", "")
 
 
-def _ask_local(prompt: str, schema: dict, cached: str, think: bool, max_tokens: int) -> dict:
-    """The same contract as `_ask`, on a local model; the server constrains decoding to the JSON schema."""
+def _ask_openai(url: str, model: str, prompt: str, schema: dict, cached: str, max_tokens: int, key: str = "",
+                extra: dict | None = None) -> dict:
+    """One call to an OpenAI-compatible chat endpoint that constrains its answer to the JSON schema."""
     response = httpx.post(
-        f"{LOCAL_LLM_URL}/chat/completions",
+        f"{url}/chat/completions",
+        headers={"Authorization": f"Bearer {key}"} if key else {},
         json={
-            "model": LOCAL_LLM_MODEL,
+            "model": model,
             "max_tokens": max_tokens,
             "temperature": 0,
             "messages": [{"role": "user", "content": "\n\n".join(filter(None, (cached, prompt)))}],
             "response_format": {"type": "json_schema", "json_schema": {"name": "answer", "schema": schema}},
-            "chat_template_kwargs": {"enable_thinking": think and LOCAL_LLM_THINK},
+            **(extra or {}),
         },
         timeout=1800,
     )
     response.raise_for_status()
     choice = response.json()["choices"][0]
     if choice["finish_reason"] == "length":
-        raise RuntimeError("The local model ran out of tokens before finishing its answer.")
+        raise RuntimeError("The model ran out of tokens before finishing its answer.")
     return json.loads(choice["message"]["content"])
+
+
+def _ask_local(prompt: str, schema: dict, cached: str, think: bool, max_tokens: int) -> dict:
+    """The same contract as `_ask`, on a local vLLM server; `chat_template_kwargs` is a vLLM extension."""
+    return _ask_openai(LOCAL_LLM_URL, LOCAL_LLM_MODEL, prompt, schema, cached, max_tokens,
+                       extra={"chat_template_kwargs": {"enable_thinking": think and LOCAL_LLM_THINK}})
 
 
 def _ask(prompt: str, schema: dict, effort: str, model: str = WORKER, cached: str = "", think: bool = True, max_tokens: int = 16000) -> dict:
@@ -174,7 +195,7 @@ def _ask(prompt: str, schema: dict, effort: str, model: str = WORKER, cached: st
     if LOCAL_LLM_URL:
         return _ask_local(prompt, schema, cached, think, max_tokens)
     # Sonnet can route a safety decline to a fallback model; Haiku has no server-side fallback.
-    fallback = {"betas": ["server-side-fallback-2026-07-01"], "fallbacks": "default"} if model == PLANNER else {}
+    fallback = {"betas": ["server-side-fallback-2026-07-01"], "fallbacks": "default"} if model.startswith("claude-sonnet") else {}
     response = client.beta.messages.create(
         model=model,
         max_tokens=max_tokens,
@@ -234,6 +255,13 @@ matched_assays: when the question needs several assays from the same samples (fo
 
 
 def _plan(question: str) -> dict:
+    if PLAN_LLM_URL:
+        try:
+            return _ask_openai(PLAN_LLM_URL, PLAN_LLM_MODEL, f"Research question:\n{question}", PLAN_SCHEMA,
+                               PLAN_PROMPT.format(vocabulary="; ".join(cellxgene_diseases())), 16000, key=PLAN_LLM_KEY)
+        except (httpx.HTTPError, ValueError, KeyError) as error:
+            # A free hosted tier can be busy (503) or rate-limited (429); the search still runs, planned locally.
+            print(f"planning service failed ({error}); planning on the default model", file=sys.stderr)
     return _ask(
         f"Research question:\n{question}",
         PLAN_SCHEMA,
@@ -414,9 +442,13 @@ def _workbench_facts(dataset: Dataset) -> None:
 
 
 def _fetch_samples(dataset: Dataset) -> None:
-    """Warm the on-disk sample cache: Gemma's curated groups if they exist, else the GEO sample records."""
-    if dataset.source == "GEO" and not samples.gemma_fields(dataset.accession):
-        samples.geo_fields(dataset.accession)
+    """Warm the on-disk sample cache: Gemma's curated groups if they exist, else the GEO sample records.
+    A fetch that still fails after the retries leaves that dataset without sample counts; it does not end the search."""
+    try:
+        if dataset.source == "GEO" and not samples.gemma_fields(dataset.accession):
+            samples.geo_fields(dataset.accession)
+    except httpx.HTTPError as e:
+        print(f"samples for {dataset.accession} not fetched: {e}", flush=True)
 
 
 def prefetch(pool: list[Dataset]) -> None:
@@ -447,8 +479,14 @@ def add_facts(search_plan: dict, candidates: list[Dataset]) -> None:
     with ThreadPoolExecutor(max_workers=10) as workers:
         list(workers.map(_fetch_samples, geo))
     # Fetching is rate-limited; labelling is not, so every labelling call runs at once.
+    def geo_facts(d: Dataset) -> None:
+        try:
+            _geo_facts(topic, d)
+        except httpx.HTTPError as e:
+            print(f"facts for {d.accession} skipped: {e}", flush=True)
+
     with ThreadPoolExecutor(max_workers=len(geo) + len(pride) or 1) as workers:
-        list(workers.map(lambda d: _geo_facts(topic, d), geo))
+        list(workers.map(geo_facts, geo))
         list(workers.map(lambda d: _sdrf_facts(topic, d), pride))
     workbench = [d for d in candidates if d.source in ("MetabolomicsWorkbench", "MetaboLights")][:MAX_FACTS]
     with ThreadPoolExecutor(max_workers=8) as workers:
@@ -474,8 +512,10 @@ Candidate datasets:
 
 For every numbered candidate, give a one-sentence reason a non-expert can follow, then answer the four checks from its text. Answer 'unclear' when the text does not say. For evidence, copy one short exact phrase from that candidate's text that supports the checks."""
 
-TRIAGE_BATCH = 25
-SCREEN_BATCH = 4
+# Datasets per triage and screening call. A hosted model answers a large batch as fast as a small one, and fewer calls
+# keep a free tier under its per-minute limit; the local model is quickest with the small defaults.
+TRIAGE_BATCH = int(os.environ.get("OMICS_TRIAGE_BATCH") or 25)
+SCREEN_BATCH = int(os.environ.get("OMICS_SCREEN_BATCH") or 4)
 
 
 def _listing(batch: list[Dataset], chars: int) -> str:
@@ -495,7 +535,14 @@ def _answers(name: str, template: str, question: str, schema: dict, candidates: 
 
     def ask(batch: list[Dataset]) -> dict[str, dict]:
         prompt = template.replace("{question}", question).replace("{listing}", _listing(batch, chars))
-        return {batch[a["n"]].accession: a for a in _ask(prompt, schema, effort=effort, think=think)["answers"] if 0 <= a["n"] < len(batch)}
+        reply = None
+        if ANSWER_LLM_URL:
+            try:
+                reply = _ask_openai(ANSWER_LLM_URL, ANSWER_LLM_MODEL, prompt, schema, "", 16000, key=ANSWER_LLM_KEY)
+            except (httpx.HTTPError, ValueError, KeyError) as error:
+                print(f"{name} service failed ({str(error)[:120]}); asking the default model", file=sys.stderr)
+        reply = reply or _ask(prompt, schema, effort=effort, think=think)
+        return {batch[a["n"]].accession: a for a in reply["answers"] if 0 <= a["n"] < len(batch)}
 
     with ThreadPoolExecutor(max_workers=len(batches) or 1) as workers:
         known |= {k: v for part in workers.map(ask, batches) for k, v in part.items()}

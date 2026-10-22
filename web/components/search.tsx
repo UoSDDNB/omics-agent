@@ -141,7 +141,8 @@ export function Search() {
   const field = useRef<HTMLTextAreaElement>(null);
   const current = useRef<AbortController | null>(null);
 
-  // A search is kept for the tab's session, so coming back from a dataset page lands on the same results and row.
+  // A search is kept for the tab's session, so coming back to /?q=<question> lands on the same results and row.
+  // Plain "/" is the home page, so the logo always leads home rather than back to the last results.
   useLayoutEffect(() => {
     const asked = new URLSearchParams(location.search).get("q")?.trim();
     const saved = sessionStorage.getItem(LAST);
@@ -152,11 +153,10 @@ export function Search() {
       open(asked, true);
       return;
     }
-    if (!last) return;
+    if (!last || !asked) return;
     setQ(last.question);
     setPlan(last.plan);
     setResult(last);
-    if (!asked) history.replaceState(null, "", `/?q=${encodeURIComponent(last.question)}`);
     const y = Number(sessionStorage.getItem(SCROLL));
     sessionStorage.removeItem(SCROLL);
     if (y) requestAnimationFrame(() => window.scrollTo(0, y));
@@ -250,8 +250,18 @@ export function Search() {
 
   const idle = !running && !result && !error && !plan;
 
+  // Home from the results: the page stays mounted when only the query changes, so clear the search as well.
+  function home() {
+    current.current?.abort();
+    setQ(""); setPlan(null); setResult(null); setError(null); setReached([]); setCounts({}); setSeconds(0); setRunning(false);
+    setCited(null); setMiss(null);
+  }
+
   return (
     <div className={cn("mx-auto w-full max-w-3xl grid grid-cols-1 content-start gap-6", idle && "min-h-[calc(100dvh-10rem)] content-center")}>
+      {!idle && (
+        <nav><Link href="/" onClick={home} aria-label="locus home" className="leading-none"><Wordmark className="text-[30px]" /></Link></nav>
+      )}
       {idle && (
         <div className="grid justify-items-center gap-5 text-center animate-in fade-in slide-in-from-bottom-2 duration-700">
           <Wordmark className="text-[88px] sm:text-[120px]" />
