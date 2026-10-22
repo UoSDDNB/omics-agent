@@ -9,12 +9,16 @@ from pathlib import Path
 import anthropic
 import httpx
 
-from . import compare, index, methods, samples, samplesheet, sdrf, store
+from . import answer, assay, compare, index, methods, samples, samplesheet, sdrf, store
 from .sources import Dataset, cellxgene_diseases, download_plan, search_cellxgene, search_geo, search_pride
 
 PLANNER = "claude-sonnet-5-5"
 WORKER = "claude-haiku-5-5"
-MAX_FACTS = 40
+# How many triaged candidates are screened, and how many GEO datasets get their samples counted. In tests on five
+# questions, ranks 41-60 still passed the screen at close to the rate of ranks 1-40 on rich topics (IPF: 12 of 20,
+# including classic datasets), and added little but cost nothing in time on sparse ones.
+KEEP = 60
+MAX_FACTS = 60
 POOL = {"GEO": 300, "PRIDE": 50, "CELLxGENE": 50}
 INDEX_POOL = 300
 REPOSITORIES = {"GEO": search_geo, "PRIDE": search_pride, "CELLxGENE": search_cellxgene}
@@ -165,7 +169,8 @@ def _ask_local(prompt: str, schema: dict, cached: str, think: bool, max_tokens: 
 def _ask(prompt: str, schema: dict, effort: str, model: str = WORKER, cached: str = "", think: bool = True, max_tokens: int = 16000) -> dict:
     """`cached` is a fixed prompt prefix, cached across calls so only the varying part is billed in full.
     `think=False` skips the thinking pass, for coarse scoring where speed matters more than reasoning.
-    `max_tokens` bounds the answer; a short paragraph needs far fewer than the default."""
+    `max_tokens` bounds the answer; a short paragraph needs far fewer than the default.
+    Haiku 5.5 rejects sampling settings such as temperature 0, so repeatability comes from remembering answers."""
     if LOCAL_LLM_URL:
         return _ask_local(prompt, schema, cached, think, max_tokens)
     # Sonnet can route a safety decline to a fallback model; Haiku has no server-side fallback.
@@ -245,7 +250,7 @@ def gather(search_plan: dict, question: str) -> list[Dataset]:
         terms = search_plan["terms"] + search_plan.get("pride_keywords", [])
         # Embedding search matches study summaries best against summary-like text, so it uses the plan's ideal summary.
         meaning = search_plan.get("ideal_summary") or question
-        return index.load(index.search(meaning, terms, repositories, search_plan["organism"], INDEX_POOL))
+        return index.load(index.search(meaning, terms, repositories, search_plan["organism"], INDEX_POOL, asked=question))
     with ThreadPoolExecutor() as pool:
         results = pool.map(lambda r: REPOSITORIES[r](search_plan, POOL[r]), [r for r in repositories if r in REPOSITORIES])
     seen: dict[str, Dataset] = {}
@@ -275,7 +280,7 @@ def samplesheet_files(accession: str, topic: str) -> dict[str, str]:
     records = samples.geo_records(accession)
     labels = geo_labels(topic, accession, store.summary(accession))
     runs = samplesheet.ena_runs(sorted({r["srx"] for r in records if r["srx"]}))
-    return samplesheet.build(accession, records, labels, runs)
+    return samplesheet.build(accession, records, labels, runs, assay.library_types(accession))
 
 
 def export_samplesheet(accession: str, topic: str) -> bytes:
@@ -327,7 +332,7 @@ def _profile(accession: str, topic: str) -> compare.Profile:
         labels = geo_labels(topic, accession, dataset.text)
         facts = samples.count(samples.geo_fields(accession), labels, "GEO sample records", [r["fields"] for r in records])
         files = samples.geo_files(accession)
-    return compare.build_profile(asdict(dataset), records, labels, facts, files)
+    return compare.build_profile(asdict(dataset), records, labels, facts, files, store.metadata([accession]).get(accession))
 
 
 def _contrast(a: compare.Profile, b: compare.Profile, topic: str) -> dict:
@@ -386,6 +391,28 @@ def _geo_facts(topic: str, dataset: Dataset) -> None:
         dataset.facts = samples.count(fields, labels, "GEO sample records", samples.geo_samples(dataset.accession))
 
 
+HEALTHY = re.compile(r"control|healt?h?y|normal|non-?diabet|donor|tolerant|\bNGT\b|\bNC\b", re.I)
+
+
+def _workbench_facts(dataset: Dataset) -> None:
+    """Cases and controls counted from a Metabolomics Workbench or MetaboLights study's sample table: the factor with a
+    control-like level, as its dataset page marks them."""
+    from . import record, volcano
+
+    try:
+        rec, pick = record.record(dataset.accession), volcano.groups(dataset.accession)["default"]
+    except (httpx.HTTPError, ValueError, KeyError):
+        return
+    # Patients against controls only: a time course (Baseline against Follow-Up) is not a case-control count.
+    if not rec or not rec["samples"] or not pick or not any(HEALTHY.search(lv) for lv in pick["control"]):
+        return
+    cols, rows = rec["samples"]["columns"], rec["samples"]["rows"]
+    i, who = cols.index(pick["factor"]), next((n for n, c in enumerate(cols) if samples.DONOR.match(c)), 0)
+    case, control = (len({r[who] for r in rows if r[i] in pick[g]}) for g in ("case", "control"))
+    dataset.facts = {"case": case, "control": control, "mixed": 0, "has_control": control > 0, "sample_type": "unknown", "tissue": "", "assays": [],
+                     "library": {}, "libraries": {}, "source": f"{len(rows)} {'Metabolomics Workbench' if dataset.source == 'MetabolomicsWorkbench' else 'MetaboLights'} sample records ({pick['factor']}{', one per subject' if who else ''})"}
+
+
 def _fetch_samples(dataset: Dataset) -> None:
     """Warm the on-disk sample cache: Gemma's curated groups if they exist, else the GEO sample records."""
     if dataset.source == "GEO" and not samples.gemma_fields(dataset.accession):
@@ -423,6 +450,9 @@ def add_facts(search_plan: dict, candidates: list[Dataset]) -> None:
     with ThreadPoolExecutor(max_workers=len(geo) + len(pride) or 1) as workers:
         list(workers.map(lambda d: _geo_facts(topic, d), geo))
         list(workers.map(lambda d: _sdrf_facts(topic, d), pride))
+    workbench = [d for d in candidates if d.source in ("MetabolomicsWorkbench", "MetaboLights")][:MAX_FACTS]
+    with ThreadPoolExecutor(max_workers=8) as workers:
+        list(workers.map(_workbench_facts, workbench))
 
 
 TRIAGE_PROMPT = """Research question:
@@ -452,29 +482,39 @@ def _listing(batch: list[Dataset], chars: int) -> str:
     return "\n\n".join(f"{n}. {d.accession} | {d.source} | {d.modality} | {d.organism}\n{d.text[:chars]}" for n, d in enumerate(batch))
 
 
-def _answers(template: str, question: str, schema: dict, batches: list[list[Dataset]], chars: int, effort: str, think: bool = True) -> dict[str, dict]:
-    """Each batch in its own parallel call; answers are matched back to datasets by their number in the batch."""
+def _answers(name: str, template: str, question: str, schema: dict, candidates: list[Dataset], size: int, chars: int, effort: str, think: bool = True) -> dict[str, dict]:
+    """Each batch in its own parallel call; answers are matched back to datasets by their number in the batch.
+    Answers are remembered per question, so a repeated search reuses them and only new candidates are asked about;
+    a changed prompt or schema starts afresh."""
+    version = hashlib.sha1((template + json.dumps(schema)).encode()).hexdigest()[:8]
+    slot = "question " + hashlib.sha1(" ".join(question.lower().split()).encode()).hexdigest()[:16]
+    kind = f"{name} answers #{version}"
+    known = store.cached_facts(slot, kind) or {}
+    missing = [d for d in candidates if d.accession not in known]
+    batches = [missing[i:i + size] for i in range(0, len(missing), size)]
+
     def ask(batch: list[Dataset]) -> dict[str, dict]:
         prompt = template.replace("{question}", question).replace("{listing}", _listing(batch, chars))
         return {batch[a["n"]].accession: a for a in _ask(prompt, schema, effort=effort, think=think)["answers"] if 0 <= a["n"] < len(batch)}
 
     with ThreadPoolExecutor(max_workers=len(batches) or 1) as workers:
-        return {k: v for part in workers.map(ask, batches) for k, v in part.items()}
+        known |= {k: v for part in workers.map(ask, batches) for k, v in part.items()}
+    if missing:
+        store.cache_facts(slot, kind, known)
+    return {d.accession: known[d.accession] for d in candidates if d.accession in known}
 
 
 def triage(question: str, candidates: list[Dataset], keep: int) -> list[Dataset]:
     """A cheap first ranking over the whole pool: Haiku scores titles and summary openings in parallel batches."""
-    batches = [candidates[i:i + TRIAGE_BATCH] for i in range(0, len(candidates), TRIAGE_BATCH)]
     # Thinking off: in tests it changed the top 40 about as much as two thinking runs differ, at a third of the time.
-    scores = {k: v["score"] for k, v in _answers(TRIAGE_PROMPT, question, TRIAGE_SCHEMA, batches, 250, "low", think=False).items()}
+    scores = {k: v["score"] for k, v in _answers("triage", TRIAGE_PROMPT, question, TRIAGE_SCHEMA, candidates, TRIAGE_BATCH, 250, "low", think=False).items()}
     ranked = sorted(candidates, key=lambda d: scores.get(d.accession, 0), reverse=True)
     return [d for d in ranked if scores.get(d.accession, 0) > 0][:keep]
 
 
 def screen(question: str, candidates: list[Dataset]) -> dict[str, dict]:
     """Haiku answers the four checks for every candidate, with a reason and a quoted phrase, in small parallel batches."""
-    batches = [candidates[i:i + SCREEN_BATCH] for i in range(0, len(candidates), SCREEN_BATCH)]
-    return _answers(SCREEN_PROMPT, question, SCREEN_SCHEMA, batches, 1500, "medium")
+    return _answers("screen", SCREEN_PROMPT, question, SCREEN_SCHEMA, candidates, SCREEN_BATCH, 1500, "medium")
 
 
 def relevant(candidates: list[Dataset], verdicts: dict[str, dict]) -> list[Dataset]:
@@ -489,7 +529,7 @@ def grade(search_plan: dict, datasets: list[Dataset], verdicts: dict[str, dict])
     hits = []
     for dataset in datasets:
         v = verdicts[dataset.accession]
-        checks = _relevant_checks(_apply_facts(v, dataset.facts, search_plan), search_plan)
+        checks = _relevant_checks(_apply_facts(v, dataset.facts, search_plan, dataset.text), search_plan)
         fit = _grade(checks)
         if fit == "none":
             continue
@@ -503,12 +543,16 @@ def grade(search_plan: dict, datasets: list[Dataset], verdicts: dict[str, dict])
     return sorted(hits, key=lambda h: rank[h["fit"]])
 
 
-def _apply_facts(checks: dict, facts: dict | None, search_plan: dict) -> dict:
-    """Counted sample facts replace the model's reading of the summary."""
+def _apply_facts(checks: dict, facts: dict | None, search_plan: dict, text: str = "") -> dict:
+    """Counted sample facts replace the model's reading of the summary. Missing one of the matched assays fails the data
+    type unless the study's own text names another assay the plan accepts (TrIP-seq's polysome fractions, GSE69352)."""
     checks = dict(checks)
     norm = lambda name: re.sub(r"[^a-z0-9]", "", name.lower())
     counted = {norm(a) for a in (facts or {}).get("libraries") or (facts or {}).get("assays", [])}
-    if counted and any(norm(a) not in counted for a in search_plan.get("matched_assays", [])):
+    matched = {norm(a) for a in search_plan.get("matched_assays", [])}
+    alternatives = {norm(a) for a in search_plan.get("assays", [])} - matched - {"rnaseq"}
+    named = {norm(found[0]) for sentence in assay._sentences(text) for found in assay._match(sentence, text)}
+    if counted and not matched <= counted and not alternatives & named:
         checks["data_type"] = "no"
     if facts and facts["has_control"] is not None:
         checks["controls"] = "yes" if facts["has_control"] else "no"
@@ -539,49 +583,9 @@ def _grade(checks: dict) -> str:
     return "strong"
 
 
-GENERIC_TISSUE = {"tissue", "tissues", "cell", "cells", "line", "lines", "primary", "human", "mouse", "sample", "samples", "normal", "whole", "derived", "cultured"}
-
-
-def _tissue_words(text: str) -> set[str]:
-    return {w for w in re.findall(r"[a-z]{4,}", text.lower()) if w not in GENERIC_TISSUE}
-
-
-def _species(organism: str) -> str:
-    return " ".join(organism.lower().split()[:2])
-
-
-def _partner(source: str, accession: str, title: str, url: str, organism: str, facts: dict) -> dict:
-    return {"accession": accession, "source": source, "title": title, "url": url, "organism": organism, "assay": " + ".join(facts.get("assays") or []), "tissue": facts["tissue"]}
-
-
-GENE_SOURCES = ["GEO", "ArrayExpress", "ExpressionAtlas", "CELLxGENE", "ENA"]
-
-
-def add_partners(search_plan: dict, hits: list[dict]) -> None:
-    """For each result with a known tissue, up to three datasets of the other molecular layer on the same topic, species
-    and tissue: PRIDE protein data (tissue from its trusted tags) for gene-expression results, and gene-expression data
-    (tissue named in its own title or summary) for PRIDE results."""
-    terms = search_plan["terms"] + search_plan.get("pride_keywords", [])
-    proteins = [d for d in index.load(index.keyword_search(terms, ["PRIDE"], search_plan["organism"], 200)) if d.facts and d.facts["tissue"]]
-    genes = index.load(index.keyword_search(terms, GENE_SOURCES, search_plan["organism"], 200)) if any(h["source"] == "PRIDE" for h in hits) else []
-    for hit in hits:
-        tissue = _tissue_words((hit.get("facts") or {}).get("tissue") or "")
-        if not tissue or (hit["source"] != "PRIDE" and hit["source"] not in GENE_SOURCES):
-            continue
-        if hit["source"] == "PRIDE":
-            matched = [(d, tissue & _tissue_words(d.text)) for d in genes]
-            shown = lambda d, w: ", ".join(dict.fromkeys(m.group() for word in sorted(w) if (m := re.search(word, d.text, re.I))))
-            others = [_partner(d.source, d.accession, d.title, d.url, d.organism, {"assays": [], "tissue": shown(d, w)}) for d, w in matched if w]
-        else:
-            others = [_partner(d.source, d.accession, d.title, d.url, d.organism, d.facts) for d in proteins if tissue & _tissue_words(d.facts["tissue"])]
-        species = _species(hit["organism"])
-        hit["partners"] = [o for o in others if o["accession"] != hit["accession"] and _species(o["organism"]) == species][:3]
-
-
-def add_papers(hits: list[dict]) -> None:
-    """Attach the linked paper (title, journal, year) to each hit, from one Europe PMC query per 25 IDs."""
-    first = {h["accession"]: next(iter(h["papers"]), None) for h in hits}
-    ids = sorted({p for p in first.values() if p})
+def paper_details(ids: list[str]) -> dict[str, dict]:
+    """Title, journal, year and link for each `pmid:` or `doi:` ID that Europe PMC knows, from one query per 25 IDs."""
+    ids = sorted(set(ids))
     found: dict[str, dict] = {}
     for start in range(0, len(ids), 25):
         chunk = ids[start:start + 25]
@@ -605,8 +609,21 @@ def add_papers(hits: list[dict]) -> None:
                 found[f"pmid:{r['pmid']}"] = paper
             if r.get("doi"):
                 found[f"doi:{r['doi'].lower()}"] = paper
+    return found
+
+
+PAPER_LAG = 3
+
+
+def add_papers(hits: list[dict]) -> None:
+    """Attach the dataset's own paper (title, journal, year) to each hit: of its linked papers, the newest that is not
+    years older than the dataset. An older paper is a method it cites (PRJEB44790, 2021, links a 1993 J Nutr paper)."""
+    linked = {h["accession"]: [p for p in h["papers"] if p != "pmid:1"][:4] for h in hits}
+    found = paper_details(list({p for ps in linked.values() for p in ps}))
     for h in hits:
-        h["paper"] = found.get(first[h["accession"]])
+        year = int((h.get("published") or "0")[:4] or 0)
+        own = [found[p] for p in linked[h["accession"]] if p in found and int(found[p].get("year") or 0) >= year - PAPER_LAG]
+        h["paper"] = max(own, key=lambda x: int(x.get("year") or 0), default=None)
 
 
 def _pmid_for_doi(doi: str) -> str | None:
@@ -619,20 +636,27 @@ def _pmid_for_doi(doi: str) -> str | None:
 
 
 def bundles(hits: list[dict]) -> list[list[dict]]:
-    """Group hits that come from the same paper, across repositories."""
+    """Group hits that are one study in several repositories: the same paper, or the same title (ArrayExpress and ENA
+    list one submission under two accessions, often with no paper)."""
     dois = {p[4:] for h in hits for p in h["papers"] if p.startswith("doi:")}
     with ThreadPoolExecutor() as pool:
         doi_to_pmid = dict(zip(dois, pool.map(_pmid_for_doi, dois)))
-    by_paper: dict[str, list[dict]] = {}
+    by_key: dict[str, list[dict]] = {}
     for h in hits:
-        keys = {f"pmid:{doi_to_pmid[p[4:]]}" if doi_to_pmid.get(p[4:]) else p for p in h["papers"]}
+        keys = {f"pmid:{doi_to_pmid[p[4:]]}" if doi_to_pmid.get(p[4:]) else p for p in h["papers"] if p != "pmid:1"}
+        if len(title := re.sub(r"[^a-z0-9]", "", h["title"].lower())) >= 25:
+            keys.add(f"title:{title}")
         for key in keys:
-            by_paper.setdefault(key, []).append(h)
-    groups = [g for g in by_paper.values() if len({h["source"] for h in g}) > 1]
-    return [g for i, g in enumerate(groups) if g not in groups[:i]]
+            by_key.setdefault(key, []).append(h)
+    groups: list[list[dict]] = []
+    for g in (g for g in by_key.values() if len({h["source"] for h in g}) > 1):
+        touching = [o for o in groups if any(h in o for h in g)]
+        merged = [h for o in touching for h in o] + [h for h in g if not any(h in o for o in touching)]
+        groups = [o for o in groups if o not in touching] + [merged]
+    return groups
 
 
-def run(question: str, limit: int = 40, progress=lambda stage, data: None) -> dict:
+def run(question: str, limit: int = KEEP, progress=lambda stage, data: None) -> dict:
     """The whole search: plan, gather wide, screen, count samples for survivors, grade, bundle.
     Shared by the CLI, API, and MCP server."""
     search_plan = plan(question)
@@ -648,11 +672,11 @@ def run(question: str, limit: int = 40, progress=lambda stage, data: None) -> di
     progress("facts", {"count": sum(1 for d in keep if d.facts)})
     hits = grade(search_plan, keep, verdicts)
     add_papers(hits)
-    add_partners(search_plan, hits)
     for h in hits:
         h["download_plan"] = download_plan(h["accession"], h["source"], h["url"])
     groups = bundles(hits)
     return {
+        "answer": answer.pick(search_plan, hits),
         "question": question,
         "plan": search_plan,
         "candidates": len(pool),

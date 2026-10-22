@@ -78,8 +78,13 @@ def fuse(*rankings: list[str]) -> list[str]:
     return sorted(score, key=score.get, reverse=True)
 
 
-def search(question: str, terms: list[str], sources: list[str], organism: str = "", limit: int = 300) -> list[str]:
-    return fuse(keyword_search(terms, sources, organism, limit), semantic_search(question, sources, organism, limit))[:limit]
+def search(question: str, terms: list[str], sources: list[str], organism: str = "", limit: int = 300, asked: str = "") -> list[str]:
+    """Keyword and meaning rankings fused; `asked`, the reader's own words, adds a second meaning ranking beside the
+    plan's ideal summary (the IPF Cell Atlas, GSE136831, ranks 26th by the question and outside 300 by the summary)."""
+    rankings = [keyword_search(terms, sources, organism, limit), semantic_search(question, sources, organism, limit)]
+    if asked:
+        rankings.append(semantic_search(asked, sources, organism, limit))
+    return fuse(*rankings)[:limit]
 
 
 def load(accessions: list[str]) -> list[Dataset]:
@@ -96,7 +101,7 @@ def load(accessions: list[str]) -> list[Dataset]:
         Dataset(
             accession=a, source=r[1], modality=r[2], title=r[3], organism=r[4], samples=r[5], url=r[6],
             text=f"{r[3]}\n{r[7]}", papers=json.loads(r[8]), published=r[9],
-            facts=cellxgene_facts(cellxgene[a]) if a in cellxgene else methods.facts(tagged[a], r[4]) if a in tagged else None,
+            facts=cellxgene_facts(cellxgene[a]) if a in cellxgene else methods.facts(tagged[a], r[4], f"{r[3]}\n{r[7]}") if a in tagged else None,
         )
         for a in accessions if (r := rows.get(a))
     ]

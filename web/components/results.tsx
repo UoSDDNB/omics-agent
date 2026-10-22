@@ -5,9 +5,12 @@ import NumberFlow from "@number-flow/react";
 import { ArrowDown, ChevronDown } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { motionTier } from "@/lib/springs";
-import { repositoryName, type Hit, type Result } from "@/lib/api";
+import { useRouter } from "next/navigation";
+import { datasetPath, genePath, repositoryName, setWatch, watches, type Hit, type Result, type Watch } from "@/lib/api";
+import { LINK as LINK_CLASS } from "@/components/page-kit";
 import { CompareDialog, Connector } from "@/components/compare";
-import { Checkbox, CountCell, DatasetRow, ROW, SEP, Stem, assayOf, materialOf, unfold } from "@/components/result-card";
+import { Checkbox, CountCell, DatasetRow, NewSince, ROW, SEP, Stem, assayOf, materialOf, rememberScroll, unfold } from "@/components/result-card";
+import Link from "next/link";
 
 type SortKey = "control" | "case" | "samples" | "year";
 
@@ -19,7 +22,7 @@ const SORT_VALUE: Record<SortKey, (h: Hit) => number | null> = {
 };
 
 // The resolved paper is canonical: GEO links papers by PubMed ID, PRIDE and CELLxGENE by DOI.
-const studyOf = (h: Hit) => h.paper?.url ?? h.papers[0] ?? h.accession;
+const studyOf = (h: Hit) => h.study ?? h.paper?.url ?? h.papers[0] ?? h.accession;
 const counted = (h: Hit) => h.facts?.case != null;
 
 function sortHits(hits: Hit[], key: SortKey) {
@@ -57,9 +60,11 @@ function StudyRow({ hits, counts, matched, topic, selected, toggle, select }: Gr
   const repositories = [...new Set(hits.map((h) => repositoryName(h.source)))];
   const assays = [...new Set(hits.map(assayOf).filter(Boolean))];
   const best = hits.filter(counted).sort((a, b) => b.facts!.case! + (b.facts!.control ?? 0) - a.facts!.case! - (a.facts!.control ?? 0))[0];
-  const samples = hits.reduce((n, h) => n + (h.samples ?? 0), 0);
+  // One submission listed in two repositories (ArrayExpress and ENA) has its samples once, not twice.
+  const mirrored = new Set(hits.map((h) => h.title)).size === 1;
+  const samples = mirrored ? Math.max(...hits.map((h) => h.samples ?? 0)) : hits.reduce((n, h) => n + (h.samples ?? 0), 0);
   const picked = hits.filter((h) => selected.has(h.accession)).length;
-  const href = best?.source === "GEO" ? `https://www.ncbi.nlm.nih.gov/geo/browse/?view=samples&series=${best.accession.slice(3)}` : best?.url;
+  const href = `${datasetPath((best ?? hits[0]).accession)}#samples`;
   return (
     <>
       <tbody data-accession={hits.map((h) => h.accession).join(" ")} className={cn(ROW, (open || picked > 0) && "bg-card hover:bg-card", open && "border-b-0")}>
@@ -77,7 +82,7 @@ function StudyRow({ hits, counts, matched, topic, selected, toggle, select }: Gr
             <button type="button" onClick={() => setOpen((v) => !v)} aria-expanded={open} className="grid w-full min-w-0 cursor-pointer gap-1 text-left">
               <span className="text-sm leading-snug text-foreground">{paper?.title ?? hits[0].title}</span>
               <span className="flex min-w-0 flex-wrap items-baseline gap-x-2 gap-y-0.5">
-                <span className="shrink-0 rounded-[3px] bg-foreground px-1.5 py-px font-mono text-[11px] font-medium text-background tabular">{hits.length} datasets</span>
+                <span className="shrink-0 rounded-[3px] bg-foreground px-1.5 py-px font-mono text-[11px] font-medium text-background tabular">{mirrored ? `${hits.length} records of one study` : `${hits.length} datasets`}</span>
                 <span className="label line-clamp-2 min-w-0 basis-full text-muted-foreground sm:line-clamp-1 sm:basis-0 sm:grow">{repositories.join(" + ")}{SEP}{assays.join(" + ")}</span>
               </span>
               {paper && (
@@ -87,8 +92,8 @@ function StudyRow({ hits, counts, matched, topic, selected, toggle, select }: Gr
               )}
             </button>
           </td>
-          {counts && <CountCell value={best?.facts?.case} tone="signal" href={href} />}
-          {counts && <CountCell value={best?.facts?.control} tone="control" pooled={best?.facts?.mixed} href={href} />}
+          {counts && <CountCell value={best?.facts?.case} tone="signal" people={best?.facts?.donors?.case} href={href} />}
+          {counts && <CountCell value={best?.facts?.control} tone="control" pooled={best?.facts?.mixed} people={best?.facts?.donors?.control} href={href} />}
           <td className="overflow-hidden py-3 pl-2 text-right align-top font-mono text-[13px] tabular text-muted-foreground max-sm:invisible max-sm:p-0">{samples || "–"}</td>
           <td className="py-3 pl-1 align-top">
             <ChevronDown aria-hidden className={cn("mt-[2px] size-4 text-muted-foreground transition-transform duration-200", open && "rotate-180")} />
@@ -153,22 +158,6 @@ function Tally({ value, label, className }: { value: number; label: string; clas
   );
 }
 
-function Toggle({ on, onClick, strike, children }: { on: boolean; onClick: () => void; strike?: boolean; children: React.ReactNode }) {
-  return (
-    <button
-      type="button"
-      aria-pressed={on}
-      onClick={onClick}
-      className={cn(
-        "rounded-[4px] border px-2 py-[3px] text-xs transition-colors duration-150",
-        on ? "border-foreground/70 bg-card text-foreground" : cn("border-rule text-muted-foreground hover:text-foreground", strike && "line-through decoration-muted-foreground/50"),
-      )}
-    >
-      {children}
-    </button>
-  );
-}
-
 function SortHeader({ label, k, sort, setSort, className }: { label: string; k: SortKey; sort: SortKey; setSort: (k: SortKey) => void; className?: string }) {
   return (
     <th className={cn("py-2 pl-2 text-right font-normal", className)} aria-sort={sort === k ? "descending" : "none"}>
@@ -177,6 +166,27 @@ function SortHeader({ label, k, sort, setSort, className }: { label: string; k: 
         <ArrowDown aria-hidden className={cn("size-3", sort !== k && "opacity-0")} />
       </button>
     </th>
+  );
+}
+
+const KIND: Record<string, string> = { matched: "Best matched assays", cohort: "Largest counted comparison", ready: "Ready to analyse" };
+
+function StartWith({ answer }: { answer: NonNullable<Result["answer"]> }) {
+  return (
+    <section aria-labelledby="start-with" className="grid gap-3 border-y border-foreground py-4">
+      <h2 id="start-with" className="label text-muted-foreground">Start with</h2>
+      <ol className="grid gap-3">
+        {answer.map((a) => (
+          <li key={a.accession} className="grid gap-0.5 sm:grid-cols-[11rem_minmax(0,1fr)] sm:gap-x-4">
+            <span className="label pt-0.5 text-muted-foreground">{KIND[a.kind]}</span>
+            <div className="grid min-w-0 gap-0.5">
+              <Link href={`${datasetPath(a.accession)}#${a.anchor}`} onClick={rememberScroll} className="w-fit text-[15px] leading-snug underline decoration-rule underline-offset-4 transition-colors duration-150 hover:decoration-foreground">{a.title}</Link>
+              <p className="text-[13px] text-muted-foreground"><span className="font-mono text-[12px] text-foreground/80">{a.accession}</span> · {a.fact}</p>
+            </div>
+          </li>
+        ))}
+      </ol>
+    </section>
   );
 }
 
@@ -215,15 +225,24 @@ function Table({ hits, matched, topic, sort, setSort, selected, toggle, select }
 
 export function Results({ result }: { result: Result }) {
   const [sort, setSort] = useState<SortKey>("control");
-  const [hidden, setHidden] = useState<Set<string>>(new Set());
+  const router = useRouter();
+  const [gene, setGene] = useState("");
   const [showPartial, setShowPartial] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [copied, setCopied] = useState(false);
   const [comparing, setComparing] = useState(false);
   const section = useRef<HTMLElement>(null);
+  const [toggled, setToggled] = useState(0);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const watch = useMemo<Watch | null>(() => watches().find((w) => w.question === result.question) ?? null, [result.question, toggled]);
+  const fresh = useMemo(() => (watch ? { since: watch.since, fresh: new Set(result.datasets.map((d) => d.accession).filter((a) => !watch.seen.includes(a))) } : null), [watch, result]);
 
-  const sources = [...new Set(result.datasets.map((d) => d.source))];
-  const visible = result.datasets.filter((d) => !hidden.has(d.source));
+  // The backend's same-study groups (one paper, or one title across repositories) collapse into one row.
+  const visible = useMemo(() => {
+    const study = new Map(result.same_paper.flatMap((g) => g.map((a) => [a, g.join("+")] as const)));
+    return result.datasets.map((d) => (study.has(d.accession) ? { ...d, study: study.get(d.accession) } : d));
+  }, [result]);
+  const geo = result.datasets.filter((d) => d.source === "GEO" && d.fit === "strong").map((d) => d.accession);
   const strong = visible.filter((d) => d.fit === "strong");
   const partial = visible.filter((d) => d.fit === "partial");
   const picked = result.datasets.filter((d) => selected.has(d.accession));
@@ -250,6 +269,7 @@ export function Results({ result }: { result: Result }) {
   }
 
   return (
+    <NewSince.Provider value={fresh}>
     <motion.section ref={section} initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} transition={motionTier.entrance} className="relative grid grid-cols-1 gap-5 pb-16">
       <h2 className="flex flex-wrap items-baseline gap-x-6 gap-y-1">
         {strongCount > 0 ? (
@@ -258,16 +278,23 @@ export function Results({ result }: { result: Result }) {
           <span className="text-sm font-medium">No dataset meets every requirement</span>
         )}
         {strongCount !== result.datasets.length && <Tally value={result.datasets.length} label="relevant" />}
+        <button type="button" onClick={() => { setWatch(result.question, watch ? null : result.datasets.map((d) => d.accession)); setToggled((n) => n + 1); }}
+          className="ml-auto text-[13px] font-normal text-muted-foreground underline decoration-rule underline-offset-4 transition-colors duration-150 hover:text-foreground hover:decoration-foreground"
+          title={watch ? "Stop watching this search" : "Later runs of this search mark the datasets locus adds after today"}>
+          {watch ? `Watching since ${watch.since}${fresh?.fresh.size ? ` · ${fresh.fresh.size} new` : ""}` : "Watch this search"}
+        </button>
       </h2>
 
-      <div className="flex flex-wrap items-center gap-1.5">
-        <span className="basis-full text-xs text-muted-foreground sm:basis-24">Show</span>
-        {sources.map((s) => (
-          <Toggle key={s} strike on={!hidden.has(s)} onClick={() => setHidden((h) => flip(h, s))}>
-            {repositoryName(s)} {result.datasets.filter((d) => d.source === s).length}
-          </Toggle>
-        ))}
-      </div>
+      {!!result.answer?.length && <StartWith answer={result.answer} />}
+
+      {geo.length > 0 && (
+        <form onSubmit={(e) => { e.preventDefault(); if (gene.trim()) router.push(genePath(gene.trim(), geo, result.plan.terms.join(", "))); }} className="flex flex-wrap items-center gap-2 text-[13px]">
+          <label htmlFor="gene-across" className="text-muted-foreground">Your gene across the {geo.length} usable GEO datasets</label>
+          <input id="gene-across" value={gene} onChange={(e) => setGene(e.target.value)} placeholder="e.g. SPP1" autoComplete="off" spellCheck={false}
+            className="h-8 w-32 rounded-md border border-rule bg-card px-2 font-mono text-[16px] uppercase outline-none transition-colors duration-150 placeholder:normal-case placeholder:text-muted-foreground focus:border-foreground sm:text-[13px]" />
+          <button type="submit" className={cn("font-medium", LINK_CLASS)}>Show</button>
+        </form>
+      )}
 
       {strong.length > 0 && <Table hits={strong} matched={result.plan.matched_assays ?? []} topic={result.plan.terms.join(", ")} sort={sort} setSort={setSort} selected={selected} toggle={toggle} select={select} />}
 
@@ -322,5 +349,6 @@ export function Results({ result }: { result: Result }) {
         )}
       </AnimatePresence>
     </motion.section>
+    </NewSince.Provider>
   );
 }

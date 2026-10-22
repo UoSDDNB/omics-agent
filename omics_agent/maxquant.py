@@ -28,21 +28,40 @@ from . import sdrf, sources
 MAXQUANT_VERSION = "2.0.3.0"
 MAXQUANT_IMAGE = f"quay.io/biocontainers/maxquant:{MAXQUANT_VERSION}--py310hdfd78af_1"
 KIT_DIR = "__KIT_DIR__"  # run_maxquant.sh substitutes the unpacked kit directory; MaxQuant's workers need absolute paths
-MIN_MEMORY_GB = 16  # per search; docs/data-processing-contract.md puts MaxQuant at 8–16 GB and on the HPC tier
+MIN_MEMORY_GB = 16  # per search; PRIDE Map measured a 13.4 GB peak for two DDA runs (PXD046787, 2026-10-20)
 THREADS = 8
 MISSING = sdrf.MISSING
 NO_FRACTION = 32767  # MaxQuant's value for "not fractionated"
 
 README_CAVEAT = (
-    "THIS KIT DOES NOT RUN ON A LAPTOP AND IT DID NOT RUN ON THE MACHINE THAT MADE IT. MaxQuant needs 16 GB of RAM per "
-    f"search and hours to days of CPU, and the published container ({MAXQUANT_IMAGE}) is x86-64 only. Copy the kit to a "
-    "cluster or an x86-64 workstation that meets these requirements, run preflight.sh there, and submit with "
-    "submit_slurm.sh or run run_all.sh. locus generated and validated this kit; it has not run the search."
+    "THIS KIT DID NOT RUN ON THE MACHINE THAT MADE IT. MaxQuant needs 16 GB of RAM per search, disk of about four times "
+    f"the raw data, and the published container ({MAXQUANT_IMAGE}) is x86-64 only. A small project (a few raw files) "
+    "fits an x86-64 workstation; a large one belongs on a cluster. Run preflight.sh where you want to search, then "
+    "run_all.sh or sbatch submit_slurm.sh. locus generated and validated this kit; it has not run the search."
+)
+LICENCE_NOTE = (
+    "MaxQuant (and the Thermo and Bruker raw-file readers bundled inside it) is free for academic and non-profit use under "
+    "its own licence (https://www.maxquant.org); locus does not ship it and the kit fetches it at run time. The scripts "
+    "refuse to run it until MAXQUANT_ACCEPT_LICENSE=1 is set, meaning you have read and accept those terms. Do not push "
+    "a container built from it to a public registry."
 )
 
-# MaxQuant's msInstrument codes, by words in the SDRF's comment[instrument]. Anything else is treated as an Orbitrap
-# and listed under "check" in the README.
-INSTRUMENTS = [(re.compile(r"timstof|tims", re.I), 1), (re.compile(r"tof|impact|maxis", re.I), 2)]
+# MaxQuant's instrument groups, by words in the SDRF's comment[instrument]: msInstrument code (0 Orbitrap, 1 Bruker Q-TOF,
+# 2 Sciex Q-TOF, 3 Agilent Q-TOF, 4 Bruker TIMS) and the peak-detection and tolerance settings MaxQuant's GUI fills in
+# when that group is chosen. Anything unmatched is treated as an Orbitrap and listed under "check" in the README.
+INSTRUMENTS = [(re.compile(r"tims", re.I), "Bruker TIMS"), (re.compile(r"impact|maxis|compact|bruker", re.I), "Bruker Q-TOF"),
+               (re.compile(r"triple ?tof|zeno ?tof|x500|sciex|ab sciex", re.I), "Sciex Q-TOF"), (re.compile(r"agilent", re.I), "Agilent Q-TOF")]
+_TOF = {"maxCharge": "4", "minPeakLen": "3", "diaMinPeakLen": "2", "useMs1Centroids": "True", "useMs2Centroids": "True", "intensityDetermination": "3",
+        "centroidMatchTol": "10", "valleyFactor": "1.2", "advancedPeakSplitting": "True", "intensityThresholdMs1": "30", "intensityThresholdMs2": "30"}
+PROFILES = {  # MaxQuant 2.x defaults per group (czbiohub-sf/mspipelines settings/ms_instrument.tsv; a timsTOF mqpar saved by 2.0.3.1)
+    "Orbitrap": (0, {"maxCharge": "7"}),
+    "Bruker Q-TOF": (1, _TOF),
+    "Sciex Q-TOF": (2, _TOF | {"minPeakLen": "2", "useMs1Centroids": "False", "useMs2Centroids": "False", "intensityThresholdMs1": "100", "intensityThresholdMs2": "20"}),
+    "Agilent Q-TOF": (3, _TOF | {"intensityThresholdMs1": "0", "intensityThresholdMs2": "0"}),
+    "Bruker TIMS": (4, _TOF | {"minPeakLen": "2", "useMs1Centroids": "False", "useMs2Centroids": "False"}),
+}
+TOF_TOLERANCES = {"mainSearchTol": "10", "isotopeMatchTol": "0.005", "isotopeMatchTolInPpm": "False", "checkMassDeficit": "False",
+                  "intensityDependentCalibration": "True", "minScoreForCalibration": "40"}
 
 # SDRF cleavage agent names (PSI-MS) to MaxQuant enzyme names.
 ENZYMES = {"trypsin": "Trypsin/P", "trypsin/p": "Trypsin/P", "lys-c": "LysC", "lysc": "LysC", "chymotrypsin": "Chymotrypsin+",
@@ -246,9 +265,14 @@ def design_of(accession: str, table: dict) -> Design:
             r.fraction = NO_FRACTION
 
     instrument = next((n for c in _cells(table, "comment[instrument]") for n in [_nt(c[0])] if n), "") if "comment[instrument]" in cols else ""
-    ms_instrument = next((code for pattern, code in INSTRUMENTS if pattern.search(instrument)), 0)
+    instrument_group = next((group for pattern, group in INSTRUMENTS if pattern.search(instrument)), "Orbitrap")
+    ms_instrument = PROFILES[instrument_group][0]
     if not instrument:
         checks.append("comment[instrument] is empty; msInstrument is set to Orbitrap (0)")
+    elif instrument_group == "Orbitrap" and not re.search(r"orbitrap|exactive|q ?exactive|fusion|lumos|eclipse|astral|exploris|ltq|velos", instrument, re.I):
+        checks.append(f"instrument '{instrument}' is not a known Orbitrap; msInstrument is set to Orbitrap (0)")
+    elif instrument_group != "Orbitrap":
+        checks.append(f"{instrument_group} settings are MaxQuant's defaults for that instrument group; open mqpar.xml in the MaxQuant GUI once to confirm them")
     organism = next((c[0] for c in _cells(table, "characteristics[organism]") if c[0].lower() not in MISSING), "") if "characteristics[organism]" in cols else ""
     if not organism:
         checks.append("characteristics[organism] is empty; download_fasta.sh needs an organism or a FASTA placed by hand")
@@ -317,9 +341,13 @@ def mqpar_xml(design: Design) -> str:
     _list(root, "paramGroupIndices", ["0"] * len(design.runs), "int")
     group = ET.SubElement(ET.SubElement(root, "parameterGroups"), "parameterGroup")
     _text(group, "msInstrument", str(design.ms_instrument))
-    _text(group, "maxCharge", "7")
+    tof = design.ms_instrument != 0
+    for tag, value in next(p for code, p in PROFILES.values() if code == design.ms_instrument).items():
+        _text(group, tag, value)
     isobaric, silac = design.labelling in PLEXES, design.labelling == "SILAC"
-    _text(group, "lcmsRunType", "Reporter ion MS2" if isobaric else "Standard")
+    _text(group, "lcmsRunType", "Reporter ion MS2" if isobaric else "TIMS-DDA" if design.ms_instrument == 4 else "Standard")
+    for tag, value in (TOF_TOLERANCES.items() if tof else ()):
+        _text(group, tag, value)
     _text(group, "lfqMode", "1" if design.labelling == "label free" else "0")
     _text(group, "matchBetweenRuns", "True" if design.labelling == "label free" else "False")
     # Labelling is never omitted: GetLmods() dereferences these even for label-free, and labelMods must hold exactly
@@ -500,9 +528,10 @@ def raw_files(accession: str) -> list[dict]:
 def resources(design: Design, raw_bytes: int) -> dict:
     """Memory, CPUs, walltime and disk for the search: 16 GB and 8 threads per search; roughly 1.5 h per raw file
     (fractions and isobaric runs are quicker per file, label-free match-between-runs slower), at least 4 h, at most 7 days;
-    disk for the raw files plus MaxQuant's intermediates, about 2.5 times the raw size."""
+    disk for the raw files plus MaxQuant's intermediates, about 4 times the raw size (PRIDE Map measured a 15.8 GB peak for
+    4 GB of raw data). Feature detection is I/O-bound: on node-local disk it ran about 6 times faster than on network storage."""
     hours = max(4, math.ceil(1.5 * len(design.runs)))
-    return {"memory_gb": MIN_MEMORY_GB, "cpus": THREADS, "hours": min(hours, 7 * 24), "disk_gb": max(10, math.ceil(2.5 * raw_bytes / 1e9))}
+    return {"memory_gb": MIN_MEMORY_GB, "cpus": THREADS, "hours": min(hours, 7 * 24), "disk_gb": max(20, math.ceil(4 * raw_bytes / 1e9))}
 
 
 def kit_files(accession: str) -> dict[str, str]:
@@ -516,9 +545,19 @@ def kit_files(accession: str) -> dict[str, str]:
     except Exception:  # noqa: BLE001  PRIDE unreachable: the kit still lists the SDRF's files, without sizes or checksums
         raw = []
     by_name = {f["name"]: f for f in raw}
+    # Bruker runs are .d folders, which PRIDE stores zipped: one 'X.d.zip' (or 'X.zip') per run is fetched and unpacked.
+    for r in design.runs:
+        if r.file.endswith(".d") and r.file not in by_name:
+            packed = by_name.get(f"{r.file}.zip") or by_name.get(f"{r.file[:-2]}.zip")
+            if packed:
+                by_name[r.file] = packed | {"name": r.file, "zip": packed["name"]}
     listed = [by_name.get(r.file, {"name": r.file, "bytes": 0, "url": "", "checksum": ""}) for r in design.runs]
     missing = [r.file for r in design.runs if r.file not in by_name] if raw else []
-    need = resources(design, sum(f["bytes"] for f in listed))
+    if missing and all(m.endswith(".d") for m in missing) and any(f["name"].endswith(".zip") for f in raw):
+        design.checks.append(f"the SDRF names Bruker .d folders that PRIDE packs into shared zip archives "
+                             f"({', '.join(f['name'] for f in raw if f['name'].endswith('.zip'))[:200]}); download and unpack them into raw/ by hand")
+    # Unmatched runs (bundled archives) carry no size: size the disk from the whole RAW listing then.
+    need = resources(design, sum(f["bytes"] for f in listed) or sum(f["bytes"] for f in raw))
     return {
         "mqpar.xml": xml,
         "preflight.sh": preflight_sh(accession, need),
@@ -556,6 +595,8 @@ def preflight_sh(accession: str, need: dict) -> str:
 # Exit 0 when the search can run here, 1 when it cannot. Nothing is downloaded or built.
 #
 # {README_CAVEAT}
+#
+# {LICENCE_NOTE}
 set -euo pipefail
 cd "$(dirname "$0")"
 {PROGRESS}
@@ -593,6 +634,16 @@ if [ "$cpus" -ge "$NEED_CPUS" ]; then ok "cpus: $cpus (mqpar.xml asks for $NEED_
 
 free_gb=$(df -Pk . | awk 'NR==2 {{printf "%d", $4/1048576}}')
 if [ "$free_gb" -ge "$NEED_DISK_GB" ]; then ok "disk: $free_gb GB free here (needs about $NEED_DISK_GB GB for raw files and intermediates)"; else block "disk: $free_gb GB free here, needs about $NEED_DISK_GB GB"; fi
+
+if [ "${{MAXQUANT_ACCEPT_LICENSE:-}}" = "1" ]; then
+  ok "MaxQuant licence accepted (MAXQUANT_ACCEPT_LICENSE=1)"
+else
+  block "MaxQuant's licence is not accepted. Read https://www.maxquant.org (free for academic and non-profit use), then export MAXQUANT_ACCEPT_LICENSE=1"
+fi
+
+# Thermo's RawFileReader fails on a symlinked .raw with 'NoSelectedDeviceException: RunHeaderEx' and no hint why.
+links=$(find raw -maxdepth 1 -type l 2>/dev/null | head -3 | tr '\n' ' ')
+if [ -n "$links" ]; then block "raw/ holds symlinks ($links); MaxQuant's Thermo reader cannot open them. Copy the files in instead"; fi
 
 if command -v MaxQuantCmd >/dev/null 2>&1 || command -v maxquant >/dev/null 2>&1; then
   ok "MaxQuant is on PATH (run_maxquant.sh will use it directly)"
@@ -646,8 +697,21 @@ def download_raw_sh(accession: str, files: list[dict]) -> str:
         "}",
         "",
     ]
+    if any(f.get("zip") for f in files):
+        lines += [
+            "unpack() {  # unpack <run.d> <zip>: a Bruker run folder PRIDE stores zipped",
+            '  local name="$1" packed="$2"',
+            '  if [ -d "raw/$name" ]; then return; fi',
+            '  unzip -q -o "raw/$packed" -d raw/ && [ -d "raw/$name" ] || { progress download failed "raw/$packed does not hold $name"; exit 1; }',
+            '  rm -f "raw/$packed"; progress download unpacked "$name"',
+            "}",
+            "",
+        ]
     for f in files:
-        lines.append(f'fetch "{f["name"]}" "{f["bytes"] or ""}" "{f["checksum"]}" "{f["url"]}"')
+        if f.get("zip"):
+            lines.append(f'[ -d "raw/{f["name"]}" ] || {{ fetch "{f["zip"]}" "{f["bytes"] or ""}" "{f["checksum"]}" "{f["url"]}"; unpack "{f["name"]}" "{f["zip"]}"; }}')
+        else:
+            lines.append(f'fetch "{f["name"]}" "{f["bytes"] or ""}" "{f["checksum"]}" "{f["url"]}"')
     lines += ["", f'progress download complete "{len(files)} file(s) in raw/"', ""]
     return "\n".join(lines)
 
@@ -699,9 +763,12 @@ IMAGE="{MAXQUANT_IMAGE}"
 KIT="$(pwd -P)"
 
 if [ -s combined/txt/proteinGroups.txt ]; then progress search skip "combined/txt/proteinGroups.txt exists"; exit 0; fi
+# Fail closed before anything is pulled: MaxQuant's licence must be accepted by whoever runs it (see README.txt).
+[ "${{MAXQUANT_ACCEPT_LICENSE:-}}" = "1" ] || {{ progress search blocked "set MAXQUANT_ACCEPT_LICENSE=1 after reading MaxQuant's licence; see README.txt"; exit 1; }}
 case "$(uname -m)" in x86_64|amd64) ;; *) progress search blocked "$(uname -m) is not x86-64; see README.txt"; exit 1 ;; esac
 for f in $(grep -o '__KIT_DIR__/raw/[^<]*' mqpar.xml | sed 's#__KIT_DIR__/##'); do
   [ -s "$f" ] || {{ progress search blocked "$f is missing; run download_raw.sh first"; exit 1; }}
+  [ -L "$f" ] && {{ progress search blocked "$f is a symlink; MaxQuant's Thermo reader cannot open it, copy the file in"; exit 1; }}
 done
 [ -s "$(grep -o '__KIT_DIR__/fasta/[^<]*' mqpar.xml | sed 's#__KIT_DIR__/##')" ] || {{ progress search blocked "FASTA missing; run download_fasta.sh first"; exit 1; }}
 
@@ -755,10 +822,31 @@ def submit_slurm_sh(accession: str, need: dict) -> str:
 # Memory is twice the {need['memory_gb']} GB minimum for headroom; walltime is an estimate of 1.5 h per raw file, at least 4 h.
 # Adjust --partition, --account and module names to your cluster. Downloads run in the job; if compute nodes have no
 # internet, run download_fasta.sh and download_raw.sh on a login node first (both are resume-safe).
+# Accept MaxQuant's licence before submitting (see README.txt):  export MAXQUANT_ACCEPT_LICENSE=1; sbatch submit_slurm.sh
+#
+# The search runs on node-local disk when the node has about {need['disk_gb']} GB free there ($TMPDIR): feature detection
+# is I/O-bound and ran about 6 times faster on local disk than on network storage. Results are copied back to combined/.
 set -euo pipefail
-cd "${{SLURM_SUBMIT_DIR:-$(dirname "$0")}}"
+KIT="${{SLURM_SUBMIT_DIR:-$(cd "$(dirname "$0")" && pwd -P)}}"
+cd "$KIT"
 module load maxquant 2>/dev/null || module load apptainer 2>/dev/null || module load singularity 2>/dev/null || true
-bash run_all.sh
+bash preflight.sh
+bash download_fasta.sh
+bash download_raw.sh
+LOCAL="${{TMPDIR:-}}"
+if [ -n "$LOCAL" ] && [ -d "$LOCAL" ] && [ ! -s combined/txt/proteinGroups.txt ] \
+   && [ "$(df -Pk "$LOCAL" | awk 'NR==2 {{printf "%d", $4/1048576}}')" -ge {need['disk_gb']} ]; then
+  WORK="$LOCAL/mq-{accession}"
+  mkdir -p "$WORK"
+  cp -r mqpar.xml run_maxquant.sh fasta "$WORK"/
+  mkdir -p "$WORK/raw" && cp raw/* "$WORK/raw/"
+  bash "$WORK/run_maxquant.sh"
+  mkdir -p combined && cp -r "$WORK/combined/txt" combined/
+  cat "$WORK/progress.jsonl" >> progress.jsonl 2>/dev/null || true
+  rm -rf "$WORK"
+else
+  bash run_maxquant.sh
+fi
 """
 
 
@@ -769,6 +857,10 @@ def readme_txt(design: Design, files: list[dict], missing: list[str], need: dict
         "=" * (len(design.accession) + 25),
         "",
         README_CAVEAT,
+        "",
+        "Licence",
+        "-------",
+        LICENCE_NOTE,
         "",
         "What this kit is",
         "----------------",
@@ -804,6 +896,7 @@ def readme_txt(design: Design, files: list[dict], missing: list[str], need: dict
         "Commands",
         "--------",
         f"  unzip {design.accession}-maxquant.zip && cd {design.accession}-maxquant",
+        "  export MAXQUANT_ACCEPT_LICENSE=1   # after reading MaxQuant's licence (see above)",
         "  bash preflight.sh          # lists every blocker on this machine; exits 1 if the search cannot run here",
         "  sbatch submit_slurm.sh     # on a Slurm cluster: preflight, downloads and search as one job",
         "  bash run_all.sh            # on a workstation that passed preflight",
@@ -819,11 +912,12 @@ def readme_txt(design: Design, files: list[dict], missing: list[str], need: dict
         "  download_raw.sh    raw files from PRIDE into raw/, with size and SHA-1 checks where PRIDE publishes them",
         "  run_maxquant.sh    the search",
         "  run_all.sh         the four above in order, stopping at the first failure",
-        "  submit_slurm.sh    Slurm job wrapping run_all.sh with the memory, CPUs and walltime above",
+        "  submit_slurm.sh    Slurm job with the memory, CPUs and walltime above; searches on node-local disk when it fits",
         "",
         "Credit",
         "------",
-        "The mqpar.xml contract and the shape of these scripts come from PRIDE Map (github.com/FlynnLachendro/pridemap),",
+        "The mqpar.xml contract, the shape of these scripts and the resource measurements come from PRIDE Map",
+        "(github.com/FlynnLachendro/pridemap),",
         "MIT licence, copyright Flynn Lachendro, Charlotte Ellison, Juri Westendorf, Ahmed Dawoud; see LICENSE.pridemap.",
         "Re-implemented in locus (github.com/UoSDDNB/omics-agent).",
         "",

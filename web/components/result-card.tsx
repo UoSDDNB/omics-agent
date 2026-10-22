@@ -1,18 +1,15 @@
 "use client";
-import { useEffect, useState } from "react";
+import { createContext, useContext, useEffect, useState } from "react";
+import Link from "next/link";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
-import { ArrowUpRight, ChevronDown, X } from "lucide-react";
+import { ArrowRight, ArrowUpRight, ChevronDown, X } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { DesignView } from "@/components/design";
 import { EASE_OUT } from "@/lib/springs";
-import { SAMPLE_TYPE, maxquantKit, repositoryName, samplesheet, type Check, type Facts, type Hit } from "@/lib/api";
-import { Methods, Partners, Ready } from "@/components/row-details";
+import { SAMPLE_TYPE, datasetPath, repositoryName, samplesheet, type Check, type Facts, type Hit } from "@/lib/api";
+import { Evidence, Methods, Ready } from "@/components/row-details";
+import { MASS_SPEC, ProtocolLine } from "@/components/assay";
 import { ProcessPanel } from "@/components/process-panel";
-
-const WARNING: Record<string, Partial<Record<Check, string>>> = {
-  patient_material: { no: "not patient material", unclear: "sample source not confirmed" },
-  data_type: { no: "different data type" },
-  controls: { no: "no healthy controls", unclear: "controls not confirmed" },
-};
 
 const DATA_TYPE: [RegExp, string][] = [
   [/expression profiling by high throughput sequencing/i, "RNA-seq"],
@@ -55,14 +52,21 @@ export const unfold = {
 // A no-break space before each dot keeps separators from starting a wrapped line.
 export const SEP = "\u00a0·  ";
 
+// Accessions a watched search had not shown before, with the date watching began.
+export const NewSince = createContext<{ since: string; fresh: Set<string> } | null>(null);
+
 export const ROW = "border-b border-rule transition-colors duration-150 last:border-b-0 hover:bg-card/60";
 
 export const ACTION =
   "flex items-center gap-1 text-[13px] text-muted-foreground underline decoration-rule underline-offset-4 transition-colors duration-150 hover:text-foreground hover:decoration-foreground";
 
+// Back from a dataset page, the search restores its results; this puts the reader back on the row they opened.
+export const SCROLL = "locus:scroll";
+export const rememberScroll = () => sessionStorage.setItem(SCROLL, String(window.scrollY));
+
 const TONE = { signal: "text-signal", control: "text-control" } as const;
 
-export function CountCell({ value, tone, pooled, href }: { value: number | null | undefined; tone: keyof typeof TONE; pooled?: number; href?: string }) {
+export function CountCell({ value, tone, pooled, people, href }: { value: number | null | undefined; tone: keyof typeof TONE; pooled?: number; people?: number; href: string }) {
   if (value === null || value === undefined) {
     return (
       <td className="py-3 pl-2 text-right align-top font-mono text-[13px] text-muted-foreground" title="Not counted from sample records">
@@ -72,15 +76,19 @@ export function CountCell({ value, tone, pooled, href }: { value: number | null 
   }
   return (
     <td className="py-3 pl-2 text-right align-top">
-      <a
+      <Link
         href={href}
-        target="_blank"
-        rel="noreferrer"
+        onClick={rememberScroll}
         title="Open the sample records"
         className={cn("font-mono text-[13px] font-medium tabular underline decoration-transparent underline-offset-4 transition-colors duration-150 hover:decoration-current", value === 0 ? "text-muted-foreground" : TONE[tone])}
       >
         {value}
-      </a>
+      </Link>
+      {people != null && people !== value && (
+        <div className="mt-0.5 whitespace-nowrap font-mono text-[11px] text-muted-foreground" title={`${value} sample records from ${people} people`}>
+          {people} {people === 1 ? "person" : "people"}
+        </div>
+      )}
       {pooled ? (
         <div className="mt-0.5 whitespace-nowrap font-mono text-[11px] text-muted-foreground" title="Libraries that pool patient and control cells, for example a multiplexed single-cell run">
           +{pooled} pooled
@@ -199,6 +207,12 @@ function Branch({ index, last, below, selected }: Branch & { selected: boolean }
   );
 }
 
+const WARNING: Record<string, Partial<Record<Check, string>>> = {
+  patient_material: { no: "not patient material", unclear: "sample source not confirmed" },
+  data_type: { no: "different data type" },
+  controls: { no: "no healthy controls", unclear: "controls not confirmed" },
+};
+
 type RowProps = {
   hit: Hit;
   matched: string[];
@@ -211,10 +225,8 @@ type RowProps = {
 
 export function DatasetRow({ hit, matched, topic, selected, onSelect, branch, counts }: RowProps) {
   const [expanded, setExpanded] = useState(false);
-  const [partnersOpen, setPartnersOpen] = useState(false);
   const [copied, setCopied] = useState(false);
   const [sheet, setSheet] = useState<"idle" | "writing" | "failed">("idle");
-  const [kit, setKit] = useState<"idle" | "writing" | { failed: string }>("idle");
   useEffect(() => {
     if (!copied) return;
     const t = setTimeout(() => setCopied(false), 1600);
@@ -222,6 +234,7 @@ export function DatasetRow({ hit, matched, topic, selected, onSelect, branch, co
   }, [copied]);
   const facts = hit.facts;
   const plan = hit.download_plan;
+  const page = datasetPath(hit.accession);
   const riboseq = hit.source === "GEO" && (facts?.assays ?? []).some((a) => /^(riboseq|tisseq|ribosomeprofiling)$/.test(norm(a)));
   // Bulk RNA-seq GEO series with counted case and control samples can run the laptop-tier pipeline.
   const rnaseq = hit.source === "GEO" && (facts?.assays ?? []).some((a) => /^(bulk|mrna|polya|total)?rnaseq$/.test(norm(a))) && (facts?.case ?? 0) >= 2 && (facts?.control ?? 0) >= 2;
@@ -240,23 +253,11 @@ export function DatasetRow({ hit, matched, topic, selected, onSelect, branch, co
       setSheet("failed");
     }
   }
-  async function exportMaxquantKit() {
-    setKit("writing");
-    try {
-      const a = document.createElement("a");
-      a.href = URL.createObjectURL(await maxquantKit(hit.accession));
-      a.download = `${hit.accession}-maxquant.zip`;
-      a.click();
-      URL.revokeObjectURL(a.href);
-      setKit("idle");
-    } catch (error) {
-      setKit({ failed: error instanceof Error ? error.message : "The kit could not be written. Try again." });
-    }
-  }
-  const samplesUrl = hit.source === "GEO" ? `https://www.ncbi.nlm.nih.gov/geo/browse/?view=samples&series=${hit.accession.slice(3)}` : hit.url;
   const reason = hit.fit === "partial" ? hit.reason : "";
   const warnings = Object.entries(WARNING).map(([k, text]) => text[hit.checks[k as keyof Hit["checks"]]]).filter(Boolean);
+  const watched = useContext(NewSince);
   const meta = [repositoryName(hit.source), hit.published?.slice(0, 4), assayOf(hit), materialOf(hit)].filter(Boolean).join(SEP);
+  const toggle = () => setExpanded((v) => !v);
 
   return (
     <tbody data-accession={hit.accession} className={cn(ROW, (selected || expanded) && "bg-card hover:bg-card")}>
@@ -266,42 +267,33 @@ export function DatasetRow({ hit, matched, topic, selected, onSelect, branch, co
           <Checkbox checked={selected} onChange={() => onSelect(hit.accession)} label={`Select ${hit.accession}`} />
         </td>
         <td className="min-w-0 py-3 pr-2 align-top">
-          <button
-            type="button"
-            onClick={() => setExpanded((v) => !v)}
-            aria-expanded={expanded}
-            className="grid w-full min-w-0 cursor-pointer gap-1 text-left"
-          >
-            <span className="text-sm leading-snug text-foreground">{hit.title}</span>
-            <span className="flex min-w-0 flex-wrap items-baseline gap-x-2" title={meta}>
-              <span className="shrink-0 font-mono text-[12px] font-medium text-foreground/80">{shortAccession(hit)}</span>
-              <span className="label line-clamp-2 min-w-0 basis-full text-muted-foreground sm:line-clamp-1 sm:basis-0 sm:grow">{meta}</span>
-            </span>
-            {!branch && hit.paper && (
-              <span className="text-[12.5px] leading-snug text-muted-foreground">
-                <span className="italic">{hit.paper.journal}</span> {hit.paper.year}
+          <div className="grid min-w-0 gap-1">
+            <Link href={page} onClick={rememberScroll} className="w-fit text-sm leading-snug text-foreground underline decoration-transparent underline-offset-4 transition-colors duration-150 hover:decoration-foreground">
+              {hit.title}
+            </Link>
+            <button type="button" onClick={toggle} aria-expanded={expanded} aria-label={`Details of ${hit.accession}`} className="grid w-full min-w-0 cursor-pointer gap-1 text-left">
+              <span className="flex min-w-0 flex-wrap items-baseline gap-x-2" title={meta}>
+                <span className="shrink-0 font-mono text-[12px] font-medium text-foreground/80">{shortAccession(hit)}</span>
+                {watched?.fresh.has(hit.accession) && <span className="label shrink-0 text-signal" title={`Not in this search when you started watching it on ${watched.since}`}>new</span>}
+                <span className="label line-clamp-2 min-w-0 basis-full text-muted-foreground sm:line-clamp-1 sm:basis-0 sm:grow">{meta}</span>
               </span>
-            )}
-            {facts?.libraries && Object.keys(facts.libraries).length > 0 && <Libraries libraries={facts.libraries} matched={matched} />}
-            {facts?.grain && <Grains facts={facts} />}
-          </button>
-          {!!hit.partners?.length && (
-            <button
-              type="button"
-              onClick={() => setPartnersOpen((v) => !v)}
-              aria-expanded={partnersOpen}
-              className="mt-1 flex cursor-pointer items-center gap-1 text-left text-[12.5px] leading-snug text-muted-foreground transition-colors duration-150 hover:text-foreground"
-            >
-              {hit.source === "PRIDE" ? "Gene" : "Protein"} data on the same tissue: {hit.partners.length}
-              <ChevronDown aria-hidden className={cn("size-3.5 transition-transform duration-200", partnersOpen && "rotate-180")} />
+              {!branch && hit.paper && (
+                <span className="text-[12.5px] leading-snug text-muted-foreground">
+                  <span className="italic">{hit.paper.journal}</span> {hit.paper.year}
+                </span>
+              )}
+              {facts?.libraries && Object.keys(facts.libraries).length > 0 && <Libraries libraries={facts.libraries} matched={matched} />}
+              {facts?.grain && <Grains facts={facts} />}
             </button>
-          )}
+          </div>
         </td>
-        {counts && <CountCell value={facts?.case} tone="signal" href={samplesUrl} />}
-        {counts && <CountCell value={facts?.control} tone="control" pooled={facts?.mixed} href={samplesUrl} />}
+        {counts && <CountCell value={facts?.case} tone="signal" people={facts?.donors?.case} href={`${page}#samples`} />}
+        {counts && <CountCell value={facts?.control} tone="control" pooled={facts?.mixed} people={facts?.donors?.control} href={`${page}#samples`} />}
         <td className="overflow-hidden py-3 pl-2 text-right align-top font-mono text-[13px] tabular text-muted-foreground max-sm:invisible max-sm:p-0">{hit.samples ?? "–"}</td>
         <td className="py-3 pl-1 align-top">
-          <ChevronDown aria-hidden className={cn("mt-[2px] size-4 text-muted-foreground transition-transform duration-200", expanded && "rotate-180")} />
+          <button type="button" onClick={toggle} aria-expanded={expanded} aria-label={`${expanded ? "Hide" : "Show"} details of ${hit.accession}`} className="relative grid cursor-pointer place-items-center before:absolute before:-inset-2 before:content-['']">
+            <ChevronDown aria-hidden className={cn("mt-[2px] size-4 text-muted-foreground transition-transform duration-200", expanded && "rotate-180")} />
+          </button>
         </td>
       </tr>
       <AnimatePresence initial={false}>
@@ -312,10 +304,10 @@ export function DatasetRow({ hit, matched, topic, selected, onSelect, branch, co
               <motion.div {...unfold} className="overflow-hidden">
                 <div className="grid gap-3 pb-4">
                 <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[13px]">
-                  <a href={hit.url} target="_blank" rel="noreferrer" className="group/link flex items-center gap-1 font-medium underline decoration-rule underline-offset-4 hover:decoration-foreground">
-                    Open in {repositoryName(hit.source)}
-                    <ArrowUpRight aria-hidden className="size-3.5 text-muted-foreground group-hover/link:text-foreground" />
-                  </a>
+                  <Link href={page} onClick={rememberScroll} className="group/link flex items-center gap-1 font-medium underline decoration-rule underline-offset-4 hover:decoration-foreground">
+                    Open dataset
+                    <ArrowRight aria-hidden className="size-3.5 text-muted-foreground transition-transform duration-150 group-hover/link:translate-x-0.5 group-hover/link:text-foreground" />
+                  </Link>
                   {hit.paper && (
                     <a href={hit.paper.url} target="_blank" rel="noreferrer" className="group/link flex items-center gap-1 text-muted-foreground underline decoration-rule underline-offset-4 hover:text-foreground hover:decoration-foreground">
                       Open paper
@@ -331,19 +323,11 @@ export function DatasetRow({ hit, matched, topic, selected, onSelect, branch, co
                     ))}
                   </div>
                 )}
-                {hit.evidence && (
-                  <p className="border-l-2 border-foreground pl-3 font-mono text-[12.5px] leading-relaxed">
-                    &quot;{hit.evidence}&quot;
-                    {facts?.case != null && (
-                      // Only the sample count is shown; the full provenance (e.g. which curators grouped the samples) stays on hover.
-                      <span className="label block pt-1.5 text-muted-foreground" title={facts.source}>
-                        counts from {facts.source.split(",")[0]}
-                      </span>
-                    )}
-                  </p>
-                )}
+                <Evidence hit={hit} onOpen={rememberScroll} />
                 {facts?.methods && <Methods methods={facts.methods} />}
+                {MASS_SPEC.has(hit.source) && <ProtocolLine accession={hit.accession} />}
                 {hit.source === "PRIDE" && <Ready accession={hit.accession} />}
+                <DesignView accession={hit.accession} source={hit.source} />
                 <details className="group/plan">
                   <summary className={cn(ACTION, "w-fit cursor-pointer list-none")}>
                     Download data
@@ -383,34 +367,6 @@ export function DatasetRow({ hit, matched, topic, selected, onSelect, branch, co
                     </span>
                   </span>
                 )}
-                {hit.source === "PRIDE" && (
-                  <span className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
-                    <button type="button" onClick={exportMaxquantKit} disabled={kit === "writing"} className={cn(ACTION, "w-fit disabled:cursor-wait disabled:no-underline")}>
-                      Download MaxQuant kit
-                    </button>
-                    <span role="status" className={cn("text-xs", typeof kit === "object" ? "text-warn" : "text-muted-foreground")}>
-                      {typeof kit === "object"
-                        ? kit.failed
-                        : kit === "writing"
-                          ? "Writing…"
-                          : "zip of mqpar.xml and run scripts from the SDRF. Runs on a cluster, not here: x86-64 only, 16 GB RAM per search, hours to days."}
-                    </span>
-                  </span>
-                )}
-                </div>
-              </motion.div>
-            </td>
-          </tr>
-        )}
-      </AnimatePresence>
-      <AnimatePresence initial={false}>
-        {partnersOpen && (
-          <tr>
-            <td />
-            <td colSpan={counts ? 5 : 3} className="pr-2">
-              <motion.div {...unfold} className="overflow-hidden">
-                <div className="pb-4">
-                  <Partners hit={hit} />
                 </div>
               </motion.div>
             </td>

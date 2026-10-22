@@ -155,7 +155,8 @@ def gemma_fields(accession: str) -> dict[str, Counter] | None:
         factors = [item for factor in sample.get("fvbasicVOs") or [] for item in factor.get("characteristics") or []]
         for prefix, items in (("curated ", factors), ("", sample.get("characteristics") or [])):
             for item in items:
-                if item["category"] not in GEMMA_SKIP and item.get("value"):
+                # Gemma leaves the category empty on some curated values; without a name they cannot be a field.
+                if item.get("category") and item["category"] not in GEMMA_SKIP and item.get("value"):
                     fields[prefix + item["category"]][item["value"]] += 1
     return fields or None
 
@@ -193,11 +194,34 @@ def resolve(name: str, values: set[str], fields: dict[str, Counter]) -> str:
     return best if best and values & set(fields[best]) else name
 
 
+VEHICLE = re.compile(r"\b(?:DMSO|vehicle|untreated|mock|sham|PBS|no treatment)\b", re.I)
+DOSE = re.compile(r"\d\s*(?:n|µ|u|m)M\b|mg/kg", re.I)
+
+
 def resolve_labels(labels: dict, fields: dict[str, Counter]) -> dict:
+    # A vehicle is a control however the model filed it: GSE132703's 'DMSO for 2h' came back as a case.
+    vehicle = [v for v in labels["case_values"] if VEHICLE.search(v) and not DOSE.search(v)]
+    labels = labels | {"case_values": [v for v in labels["case_values"] if v not in vehicle],
+                       "control_values": [*labels["control_values"], *[v for v in vehicle if v not in labels["control_values"]]]}
     return labels | {
         "group_field": resolve(labels["group_field"], set(labels["case_values"]) | set(labels["control_values"]), fields),
         "assay_field": resolve(labels.get("assay_field", ""), {v for a in labels.get("assay_values", []) for v in a["values"]}, fields),
     }
+
+
+DONOR = re.compile(r"^(?:host[ _])?(?:patient|donor|subject|individual|participant)[ _-]?(?:id|number|no|code)?$", re.I)
+
+
+def donors(fields: dict[str, Counter], labels: dict, records: list[dict[str, str]], total: int) -> dict | None:
+    """Distinct people per group when a field names the patient or donor, so 540 single cells from 9 patients count as 9."""
+    field = next((f for f in fields if DONOR.match(f.strip()) and 2 <= len(fields[f]) < total), None)
+    if not field:
+        return None
+    people: dict[str, set] = {"case": set(), "control": set()}
+    for r in records:
+        if (group := group_of(r, labels)) in people and r.get(field):
+            people[group].add(r[field])
+    return {"case": len(people["case"]), "control": len(people["control"]), "field": field} if all(people.values()) else None
 
 
 def count(fields: dict[str, Counter], labels: dict, source: str, records: list[dict[str, str]] | None = None) -> dict:
@@ -222,6 +246,7 @@ def count(fields: dict[str, Counter], labels: dict, source: str, records: list[d
         "assays": labels.get("assays", []),
         "library": dict(fields.get("library strategy", {})),
         "libraries": libs,
+        "donors": donors(fields, labels, records, total) if records and known else None,
         "source": f"{total} {source}",
     }
 
@@ -234,6 +259,9 @@ def label_prompt(topic: str, accession: str, fields: dict[str, Counter], summary
         f"and how many samples carry it:\n\n{summarize(fields)}\n\n"
         "Pick the one field that separates samples with the disease or condition of the "
         "research topic (cases) from healthy or untreated comparison samples (controls). "
+        "The cases must carry the condition the topic names (its drug, disease, genotype or exposure): when the topic is a drug, "
+        "the field is the treatment, not a knockout or cell line that is crossed with it. If no field separates that condition "
+        "from its baseline, return an empty group_field rather than another split. "
         "Copy every case value and every control value exactly as written above, including "
         "each variant of a pattern (for example both 'IPF_#a_RNA' and 'IPF_#b_RNA'). Leave a value out "
         "if it is neither. In 'title pattern', # stands for any number. "

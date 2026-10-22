@@ -18,7 +18,11 @@ Researchers often spend days searching the public archives (GEO for gene activit
 - **Count.** For each GEO study, it reads the sample records and counts the case and control samples and the libraries per assay. A model chooses which record field marks case and control. Code does the counting, so a model never writes a number.
 - **Grade.** It checks four things for each dataset: the topic, the sample material, the data type and the controls. Counted facts override the model. A dataset that meets every requirement is "usable as is". A dataset that misses one is a "close match", and locus shows which check failed.
 - **Hand off.** For each result, it gives download commands. For GEO Ribo-seq studies, it also writes an [nf-core/riboseq](https://nf-co.re/riboseq) samplesheet (see [Samplesheet export](#samplesheet-export)).
-- **Serve agents.** An MCP server gives the same functions to Claude Code or any MCP client.
+- **Read each dataset.** Every dataset has its own locus page. It shows what was measured, read from the methods with the sentence that says so. It shows the samples, with cases and controls marked, people counted, and charts that filter the table and the download commands. It shows quality from the run table and the authors' own QC, and previews processed files, including the protein table inside a PRIDE zip. For GEO RNA-seq and Metabolomics Workbench studies, it adds a first look: a volcano plot, the paper's genes on it, pathways, and a design check. Each page lists the repository API requests it was read from.
+- **Open anything.** An accession, PMID, DOI or informal citation opens its page. Papers and contributors have pages. One gene, or a whole list, can be checked across every dataset a search found.
+- **Serve agents.** An MCP server gives the same functions to Claude Code or any MCP client (25 tools).
+
+How each part is checked, with its failures: [`docs/evaluation.md`](docs/evaluation.md).
 
 Accessions come only from repository records, never from the model. A quote is shown only if it appears word for word in the dataset metadata.
 
@@ -46,7 +50,18 @@ uv run omics --json "..."    # machine-readable output
 
 Without an Anthropic key, locus can run on a local model served through an OpenAI-compatible API, such as vLLM. Set `LOCAL_LLM_URL` (for example `http://localhost:8000/v1`) and `LOCAL_LLM_MODEL` in `.env`. The server must support JSON-schema structured output. Results then depend on that model and have not been checked against the Claude runs in `docs/evidence/`.
 
-Without a local index, locus searches the live APIs of GEO, PRIDE and CELLxGENE only. To search all 18 repositories, build the index first.
+Without a local index, locus searches the live APIs of GEO, PRIDE and CELLxGENE only. To search all 18 repositories, download the index (about 1.8 GB) from the [data release](https://github.com/hridaya423/locus/releases/tag/data-2026-10-18):
+
+```sh
+mkdir -p data && cd data
+base=https://github.com/hridaya423/locus/releases/download/data-2026-10-18
+curl -LO $base/omics.db.gz -LO $base/vectors.npy -LO $base/vector_ids.json.gz -LO $base/pridemap.tar.gz -LO $base/SHA256SUMS
+shasum -a 256 -c SHA256SUMS
+gunzip omics.db.gz vector_ids.json.gz && tar -xzf pridemap.tar.gz && rm pridemap.tar.gz
+cd ..
+```
+
+This gives `data/omics.db` (888,335 datasets, with the PRIDE method tags and repository metadata), `data/vectors.npy` and `data/vector_ids.json` (the embeddings), and `data/pridemap/`. To rebuild them yourself instead, follow the next section.
 
 ### Build the index
 
@@ -123,16 +138,19 @@ Get the zip from the result row in the web app, from `GET /samplesheet/{accessio
 
 ## MaxQuant search kit
 
-For a PRIDE project with an SDRF, locus writes a zip that a researcher takes to a cluster to reprocess the raw data with MaxQuant. **The search does not run on a laptop and it does not run on the machine serving locus.** MaxQuant needs 16 GB of RAM per search and hours to days of CPU, and the published container is x86-64 only, so under [`docs/data-processing-contract.md`](docs/data-processing-contract.md) proteomics is HPC tier. locus generates and validates the kit; the user runs it.
+For a PRIDE project with an SDRF, locus writes a zip that a researcher takes to an x86-64 workstation or a cluster to reprocess the raw data with MaxQuant. **The search does not run on the machine serving locus.** Measured on two DDA runs (PXD046787, 4 GB of raw data), MaxQuant peaked at 13.4 GB of RAM, 15.8 GB of disk and about 10 busy cores, so the kit asks for 16 GB of RAM, 8 threads and disk of four times the raw data. A few raw files fit a workstation; a large project belongs on a cluster such as Iridis. The published container is x86-64 only. locus generates and validates the kit; the user runs it.
 
-- `mqpar.xml` is filled in from the SDRF: the raw file list, experiments (one per sample, or one per mixture for a multiplexed file), fractions, labelling (`comment[label]` → label-free, TMT or iTRAQ reporter channels, or SILAC states), instrument, enzymes and the fixed and variable modifications the SDRF states. Fields the SDRF leaves empty get MaxQuant's usual defaults and are listed under "Check before running" in the README.
+MaxQuant is free for academic and non-profit use under its own licence, and the kit fetches it at run time. The scripts refuse to run it until `MAXQUANT_ACCEPT_LICENSE=1` is set, and the image must not be pushed to a public registry.
+
+- `mqpar.xml` is filled in from the SDRF: the raw file list, experiments (one per sample, or one per mixture for a multiplexed file), fractions, labelling (`comment[label]` → label-free, TMT or iTRAQ reporter channels, or SILAC states), instrument group (Orbitrap, Bruker timsTOF, or Bruker, Sciex or Agilent Q-TOF, each with MaxQuant's default peak settings), enzymes and the fixed and variable modifications the SDRF states. Fields the SDRF leaves empty get MaxQuant's usual defaults and are listed under "Check before running" in the README.
 - `download_fasta.sh`, `download_raw.sh`, `run_maxquant.sh`, `run_all.sh` and `preflight.sh` are resume-safe, append one JSON line per stage to `progress.jsonl`, and stop at the first failure. `preflight.sh` lists the blockers on the machine it runs on (architecture, memory, CPUs, disk, MaxQuant availability) and exits 1 instead of pretending it can proceed.
-- `submit_slurm.sh` wraps the run in a Slurm job with the memory, CPUs and walltime the search needs.
+- `submit_slurm.sh` wraps the run in a Slurm job with the memory, CPUs and walltime the search needs, and searches on node-local disk (`$TMPDIR`) when it has room. Feature detection is I/O-bound; on local disk it ran about 6 times faster than on network storage.
+- `preflight.sh` also blocks on symlinked raw files: Thermo's reader fails on them with an error that does not say why.
 - `README.txt` repeats the design read from the SDRF, the requirements, the exact commands and the caveat above.
 
-A project without an SDRF is refused with a message saying so; nothing is guessed, because a wrong `mqpar.xml` fails hours into a run. Before the zip is written, `mqpar.xml` is checked against the contract MaxQuant 2.0.3 enforces at run time (fields that must be present, absent, empty or sized to one another; each row is a run that died 10 to 37 minutes in). The contract and the shape of the scripts come from [PRIDE Map](https://github.com/FlynnLachendro/pridemap) (MIT, [`LICENSE.pridemap`](LICENSE.pridemap)), re-implemented here.
+A project without an SDRF is refused with a message saying so; nothing is guessed, because a wrong `mqpar.xml` fails hours into a run. Before the zip is written, `mqpar.xml` is checked against the contract MaxQuant 2.0.3 enforces at run time (fields that must be present, absent, empty or sized to one another; each row is a run that died 10 to 37 minutes in). The contract, the shape of the scripts, the resource measurements and the licence gate come from [PRIDE Map](https://github.com/FlynnLachendro/pridemap) (MIT, [`LICENSE.pridemap`](LICENSE.pridemap)), re-implemented here.
 
-Get the zip from a PRIDE row in the web app (**Download MaxQuant kit**) or from `GET /maxquant-kit/{accession}`. To write kits to disk and see which fields differ between projects:
+Get the zip from a PRIDE study page (**MaxQuant kit**, under Files) or from `GET /maxquant-kit/{accession}`. To write kits to disk and see which fields differ between projects:
 
 ```sh
 uv run python -m omics_agent.maxquant PXD000159 PXD000001 PXD001345 --out kits
@@ -217,7 +235,7 @@ What a judge or a reviewer should know before trusting a result. None of these i
 **Search and counts**
 
 - Sample counts are counts of sample records, not of patients. One patient can have several libraries.
-- On a machine without the local index, locus searches the live GEO, PRIDE and CELLxGENE APIs only, not all 18 repositories. The demo machine has no index.
+- On a machine without the local index, locus searches the live GEO, PRIDE and CELLxGENE APIs only, not all 18 repositories. Download the index from the data release to search all 18.
 - The first two stages of a search (candidate scoring and the four checks) are not cached, so repeating a question can rank or include datasets differently; the plan and the sample labels are cached.
 - Results on the local model (Qwen via vLLM) have not been compared with the Claude runs in `docs/evidence/`; a search takes 4–8 minutes on it.
 - Counts exist for GEO, CELLxGENE and the PRIDE projects with a curated SDRF in [bigbio/sdrf-annotated-datasets](https://github.com/bigbio/sdrf-annotated-datasets) (about 28% of PRIDE; clone it shallow into `data/sdrf/`), or an SDRF the project itself lists in PRIDE. For those, locus counts individuals, samples and runs separately and leaves pooled, QC and reference channels out; a missing individual column shows as "unknown", never as a sample count. Other PRIDE projects have no counts.
@@ -240,7 +258,7 @@ What a judge or a reviewer should know before trusting a result. None of these i
 | `omics_agent/agent.py` | The search: plan, gather, triage, screen, count, grade, group. The CLI, API and MCP server share it. |
 | `omics_agent/samples.py` | GEO sample records, labels and counts |
 | `omics_agent/samplesheet.py` | The nf-core/riboseq export |
-| `omics_agent/maxquant.py` | The MaxQuant search kit for PRIDE projects (generated here, run on a cluster) |
+| `omics_agent/maxquant.py` | The MaxQuant search kit for PRIDE projects (generated here, run on a workstation or cluster) |
 | `omics_agent/process.py`, `deseq2.R` | The laptop-tier RNA-seq pipeline: ENA reads → salmon → counts → DESeq2 → plots |
 | `omics_agent/index.py`, `store.py` | The local index and hybrid search |
 | `omics_agent/harvest*.py`, `embed.py` | Index builders |
@@ -257,4 +275,4 @@ uv run python -m omics_agent.samplesheet
 
 ## Licence
 
-Apache 2.0 (see [`LICENSE`](LICENSE)). The web interface is built on [PRIDE Map](https://github.com/FlynnLachendro/pridemap) by Flynn Lachendro, Charlotte Ellison, Juri Westendorf and Ahmed Dawoud, under the MIT licence ([`web/LICENSE.pridemap`](web/LICENSE.pridemap)); the MaxQuant kit's `mqpar.xml` contract and scripts are re-implemented from the same project ([`LICENSE.pridemap`](LICENSE.pridemap)).
+Apache 2.0 (see [`LICENSE`](LICENSE)). The web interface is built on [PRIDE Map](https://github.com/FlynnLachendro/pridemap) by Flynn Lachendro, under the MIT licence ([`web/LICENSE.pridemap`](web/LICENSE.pridemap)); the MaxQuant kit's `mqpar.xml` contract and scripts are re-implemented from the same project ([`LICENSE.pridemap`](LICENSE.pridemap)).

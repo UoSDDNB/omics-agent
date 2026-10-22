@@ -154,6 +154,56 @@ def test_kit_files_scripts_and_notices(monkeypatch):
     assert archive.getinfo("PXD000159-maxquant/run_all.sh").external_attr >> 16 == 0o755
 
 
+@pytest.mark.parametrize("name, code, run_type, max_charge", [
+    ("timsTOF Pro", 4, "TIMS-DDA", "4"), ("Bruker impact II", 1, "Standard", "4"), ("TripleTOF 6600", 2, "Standard", "4"),
+    ("Agilent 6550 iFunnel Q-TOF", 3, "Standard", "4"), ("Q Exactive HF", 0, "Standard", "7")])
+def test_instrument_group_sets_code_run_type_and_peak_settings(name, code, run_type, max_charge):
+    """MaxQuant's codes: 0 Orbitrap, 1 Bruker Q-TOF, 2 Sciex Q-TOF, 3 Agilent Q-TOF, 4 Bruker TIMS (a timsTOF filed as 1 is read
+    as a plain Q-TOF and loses its ion mobility)."""
+    table = maxquant.read_sdrf(FIXTURES / "PXD000159.sdrf.tsv")
+    column = table["columns"].index("comment[instrument]")
+    table["rows"] = [r[:column] + [f"NT={name}"] + r[column + 1:] for r in table["rows"]]
+    d = maxquant.design_of("PXD000159", table)
+    xml = maxquant.mqpar_xml(d)
+    g = group(xml)
+    assert (g.findtext("msInstrument"), g.findtext("lcmsRunType"), g.findtext("maxCharge")) == (str(code), run_type, max_charge)
+    assert (g.findtext("mainSearchTol") == "10") == (code != 0)
+    assert maxquant.validate_mqpar(xml) == []
+
+
+def test_licence_gate_and_measured_sizing(monkeypatch, tmp_path):
+    monkeypatch.setattr(maxquant.sdrf, "sdrf_path", lambda accession: FIXTURES / f"{accession}.sdrf.tsv")
+    monkeypatch.setattr(maxquant, "raw_files", lambda accession: [
+        {"name": "SIRT6_negative_120125175013.raw", "bytes": 10_000_000_000, "url": "https://ftp.pride.ebi.ac.uk/x/a.raw", "checksum": ""}])
+    files = maxquant.kit_files("PXD000159")
+    assert "about 40 GB disk" in files["README.txt"] and "MAXQUANT_ACCEPT_LICENSE=1" in files["README.txt"]
+    for name in ("preflight.sh", "run_maxquant.sh"):
+        assert "MAXQUANT_ACCEPT_LICENSE" in files[name]
+    assert "TMPDIR" in files["submit_slurm.sh"]
+    if shutil.which("bash"):
+        # Without the licence accepted the search refuses before it looks for raw files or pulls anything.
+        (tmp_path / "run_maxquant.sh").write_text(files["run_maxquant.sh"])
+        (tmp_path / "mqpar.xml").write_text(files["mqpar.xml"])
+        env = {"PATH": "/usr/bin:/bin"}
+        out = subprocess.run(["bash", "run_maxquant.sh"], cwd=tmp_path, env=env, capture_output=True, text=True)
+        assert out.returncode == 1 and "MAXQUANT_ACCEPT_LICENSE=1" in out.stdout
+
+
+def test_bruker_runs_are_fetched_zipped_and_unpacked(monkeypatch):
+    table = maxquant.read_sdrf(FIXTURES / "PXD000159.sdrf.tsv")
+    column = table["columns"].index("comment[data file]")
+    table["rows"] = [r[:column] + [r[column].replace(".raw", ".d")] + r[column + 1:] for r in table["rows"]]
+    monkeypatch.setattr(maxquant, "sdrf_table", lambda accession: table)
+    runs = [r[column] for r in table["rows"]]
+    monkeypatch.setattr(maxquant, "raw_files", lambda accession: [
+        {"name": f"{run}.zip", "bytes": 1_000_000_000, "url": f"https://ftp.pride.ebi.ac.uk/x/{run}.zip", "checksum": ""} for run in runs])
+    files = maxquant.kit_files("PXD000159")
+    script = files["download_raw.sh"]
+    assert f'fetch "{runs[0]}.zip"' in script and f'unpack "{runs[0]}" "{runs[0]}.zip"' in script
+    assert "not in PRIDE's RAW listing" not in files["README.txt"]
+    assert subprocess.run(["bash", "-n"], input=script, text=True, capture_output=True).returncode == 0
+
+
 def test_diff_lists_only_the_fields_that_differ():
     kits = {a: maxquant.mqpar_xml(design(a)) for a in ("PXD000159", "PXD000001")}
     text = maxquant.diff_fields(kits)
