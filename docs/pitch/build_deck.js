@@ -3,7 +3,7 @@
 const pptxgen = require("pptxgenjs");
 const path = require("path");
 
-const ROOT = "/home/jlw/omics-agent-pipeline";
+const ROOT = path.resolve(__dirname, "../..");
 const PLOTS = path.join(ROOT, "data/process/GSE273888/plots");
 
 const THEME = {
