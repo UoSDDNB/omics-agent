@@ -18,9 +18,8 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
+from metadata_audit import DB
 from metadata_audit import fields as fields_of
-
-DB = Path("/home/jlw/locus-data/omics.db")
 
 # First match wins, so the specific domains come before the broad ones.
 DOMAINS = [

@@ -14,6 +14,7 @@ import argparse
 import csv
 import io
 import json
+import os
 import random
 import re
 import sqlite3
@@ -27,7 +28,7 @@ import httpx
 
 from omics_agent import record, store
 
-DB = Path("/home/jlw/locus-data/omics.db")
+DB = Path(os.environ.get("OMICS_DB") or Path.home() / "fast/locus/data/omics.db")
 SEED = 20261020
 
 # Datasets drawn per repository: enough for a rate within about ±5 points on the big ones, at least 25 everywhere.
