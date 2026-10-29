@@ -15,7 +15,7 @@ from pydantic import BaseModel, Field, StringConstraints
 
 load_dotenv()
 
-from . import agent, assay, browse, design, design_check, everywhere, lists, paper, person, preview, process, qc, record, resolve, sources, subset, table, users, volcano, why  # noqa: E402  (needs the API key loaded first)
+from . import agent, assay, browse, design, design_check, everywhere, lists, paper, person, preview, process, qc, record, resolve, saved, sources, subset, table, users, volcano, why  # noqa: E402  (needs the API key loaded first)
 
 HEARTBEAT = 10
 
@@ -23,6 +23,8 @@ app = FastAPI(title="omics-agent")
 app.add_middleware(CORSMiddleware, allow_origins=["http://localhost:3000", "http://localhost:3020"], allow_methods=["*"], allow_headers=["*"])
 # Accounts: /account/* routes and the shared {"error": {...}} shape (users.py holds sessions, CSRF guard, rate limits).
 users.install(app)
+# Saved datasets and named lists under /lists/* (saved.py); the gene-list checker keeps POST /list.
+saved.install(app)
 
 
 class SearchIn(BaseModel):

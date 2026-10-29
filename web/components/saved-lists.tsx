@@ -1,0 +1,361 @@
+"use client";
+import { useCallback, useEffect, useState } from "react";
+import Link from "next/link";
+import { useRouter } from "next/navigation";
+import { ChevronLeft, Download } from "lucide-react";
+import { Wordmark } from "@/components/logo";
+import { BackToResults } from "@/components/back-to-results";
+import { AuthPrompt } from "@/components/auth-prompt";
+import { Heading, LINK, MUTED_LINK } from "@/components/page-kit";
+import { SEP } from "@/components/result-card";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
+import { datasetPath, repositoryName } from "@/lib/api";
+import { AccountError } from "@/lib/account";
+import {
+  LIMITS, deleteList, describeError, editItem, editList, exportHref, getList, newList, parseTags, reload, removeFrom, useSaved,
+  type Item, type ListDetail,
+} from "@/lib/lists";
+import { cn } from "@/lib/utils";
+
+const day = (iso: string) => iso.slice(0, 10);
+const datasets = (n: number) => `${n.toLocaleString()} ${n === 1 ? "dataset" : "datasets"}`;
+
+function Nav({ back }: { back?: boolean }) {
+  return (
+    <nav className="flex items-center gap-5">
+      <Link href="/" aria-label="locus home" className="leading-none"><Wordmark className="text-[30px]" /></Link>
+      {back ? (
+        <Link href="/lists" className={cn("flex items-center gap-1 text-[13px]", MUTED_LINK)}>
+          <ChevronLeft aria-hidden className="size-3.5" />All lists
+        </Link>
+      ) : (
+        <BackToResults />
+      )}
+    </nav>
+  );
+}
+
+// One saved dataset: its snapshot as saved, with a link to the live dataset page.
+function ItemHead({ item }: { item: Item }) {
+  const s = item.snapshot;
+  const meta = [s.source && repositoryName(s.source), s.organism, s.modality, s.samples != null && `${s.samples.toLocaleString()} samples`].filter(Boolean).join(SEP);
+  return (
+    <div className="grid min-w-0 gap-1">
+      <Link href={datasetPath(item.accession)} className={cn("w-fit text-[15px] leading-snug", LINK)}>{s.title || item.accession}</Link>
+      <p className="flex min-w-0 flex-wrap items-baseline gap-x-2">
+        <span className="font-mono text-[12px] font-medium text-foreground/80">{item.accession}</span>
+        {meta && <span className="label min-w-0 text-muted-foreground">{meta}</span>}
+      </p>
+      <p className="font-mono text-[11.5px] tabular text-muted-foreground">added {day(item.added_at)}</p>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------- /lists
+
+export function ListsPage() {
+  const saved = useSaved();
+  const router = useRouter();
+  const [name, setName] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  async function create(e: React.FormEvent) {
+    e.preventDefault();
+    setBusy(true);
+    setError("");
+    try {
+      const list = await newList(name.trim());
+      router.push(`/lists/${list.id}`);
+    } catch (err) {
+      setError(describeError(err));
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="mx-auto grid w-full max-w-4xl content-start gap-10">
+      <Nav />
+      <header className="grid gap-3">
+        <h1 className="font-display text-[34px] leading-[1.08] sm:text-[44px]">Lists</h1>
+        <p className="max-w-xl text-[15px] text-muted-foreground">Datasets you saved, in the order you added them, with your notes and tags.</p>
+      </header>
+      {saved.status === "loading" ? (
+        <p className="text-[13px] text-muted-foreground">Reading your lists…</p>
+      ) : saved.status === "failed" ? (
+        <p role="alert" className="flex flex-wrap items-baseline gap-x-3 text-[13px]">locus could not read your lists. <button type="button" onClick={() => reload()} className={LINK}>Try again</button></p>
+      ) : saved.status === "guest" ? (
+        <GuestSaved />
+      ) : (
+        <div className="grid gap-10" data-lists-page="signed-in">
+          <table className="w-full border-collapse text-[14px]">
+            <thead className="border-b border-foreground">
+              <tr className="label text-muted-foreground">
+                <th className="py-2 text-left font-normal">List</th>
+                <th className="py-2 pl-3 text-right font-normal">Datasets</th>
+                <th className="py-2 pl-3 text-right font-normal max-sm:hidden">Updated</th>
+              </tr>
+            </thead>
+            <tbody>
+              {saved.lists.map((l) => (
+                <tr key={l.id} className="border-b border-rule" data-list-row={l.name}>
+                  <td className="py-3 align-top">
+                    <Link href={`/lists/${l.id}`} className={cn("font-medium", LINK)}>{l.name}</Link>
+                    {l.description && <p className="mt-0.5 line-clamp-1 text-[13px] text-muted-foreground">{l.description}</p>}
+                  </td>
+                  <td className="py-3 pl-3 text-right align-top font-mono text-[13px] tabular">{l.count.toLocaleString()}</td>
+                  <td className="py-3 pl-3 text-right align-top font-mono text-[13px] tabular text-muted-foreground max-sm:hidden">{day(l.updated_at)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <section aria-labelledby="new-list" className="grid max-w-xl gap-3">
+            <Heading id="new-list">New list</Heading>
+            <form onSubmit={create} className="flex flex-wrap gap-3">
+              <Input value={name} onChange={(e) => setName(e.target.value)} maxLength={LIMITS.name} aria-label="Name of the new list"
+                placeholder="Ribo-seq in HEK293" className="h-9 max-w-xs bg-card" />
+              <Button type="submit" size="lg" disabled={busy || !name.trim() || saved.lists.length >= LIMITS.lists}>{busy ? "Creating…" : "Create list"}</Button>
+            </form>
+            {error && <p role="alert" className="text-[13px] text-destructive">{error}</p>}
+            <p className="text-[12px] text-muted-foreground">
+              Up to {LIMITS.lists} lists of {LIMITS.items} datasets each. Save from any search result or dataset page; the arrow beside Save picks the list.
+            </p>
+          </section>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function GuestSaved() {
+  const saved = useSaved();
+  const [error, setError] = useState("");
+  const items = saved.guest;
+  return (
+    <section aria-labelledby="this-browser" className="grid gap-6" data-lists-page="guest">
+      <Heading id="this-browser" count={items.length || undefined}>Saved in this browser</Heading>
+      <AuthPrompt reason="This list lives only in this browser. With an account, saved datasets, named lists, notes and tags follow you to every device." />
+      {error && <p role="alert" className="text-[13px] text-destructive">{error}</p>}
+      {items.length === 0 ? (
+        <p className="text-[14px] text-muted-foreground">Nothing saved yet. Use Save on a search result or a dataset page.</p>
+      ) : (
+        <ul className="grid border-t border-rule">
+          {items.map((item) => (
+            <li key={item.accession} data-item={item.accession} className="flex items-start justify-between gap-4 border-b border-rule py-4">
+              <ItemHead item={item} />
+              <button type="button" onClick={() => removeFrom("saved", item.accession).catch((e) => setError(describeError(e)))} className={cn("shrink-0 text-[13px]", MUTED_LINK)}>
+                Remove
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  );
+}
+
+// ---------------------------------------------------------------- /lists/[id]
+
+export function ListPage({ id }: { id: string }) {
+  const saved = useSaved();
+  const numeric = /^\d+$/.test(id) ? Number(id) : null;
+  const [detail, setDetail] = useState<ListDetail | null>(null);
+  const [problem, setProblem] = useState<"" | "missing" | "failed">("");
+  const [attempt, setAttempt] = useState(0);
+  const signedIn = saved.status === "signed-in";
+
+  useEffect(() => {
+    if (!signedIn || numeric === null) return;
+    let live = true;
+    getList(numeric).then(
+      (d) => { if (live) { setDetail(d); setProblem(""); } },
+      (e) => { if (live) setProblem(e instanceof AccountError && e.code === "LIST_NOT_FOUND" ? "missing" : "failed"); },
+    );
+    return () => { live = false; };
+  }, [signedIn, numeric, attempt]);
+
+  useEffect(() => {
+    document.title = detail ? `${detail.list.name} · locus` : "List · locus";
+  }, [detail]);
+
+  const missing = numeric === null || problem === "missing";
+  return (
+    <div className="mx-auto grid w-full max-w-4xl content-start gap-10">
+      <Nav back />
+      {saved.status === "loading" ? (
+        <p className="text-[13px] text-muted-foreground">Reading the list…</p>
+      ) : saved.status === "guest" ? (
+        <AuthPrompt reason="Lists are kept in an account. Sign in to open this one." />
+      ) : missing ? (
+        <p className="text-[14px]">There is no such list in your account. <Link href="/lists" className={LINK}>See all your lists</Link>.</p>
+      ) : problem === "failed" || saved.status === "failed" ? (
+        <p role="alert" className="flex flex-wrap items-baseline gap-x-3 text-[13px]">locus could not read this list. <button type="button" onClick={() => setAttempt((n) => n + 1)} className={LINK}>Try again</button></p>
+      ) : !detail ? (
+        <p className="text-[13px] text-muted-foreground">Reading the list…</p>
+      ) : (
+        <ListBody detail={detail} onChange={setDetail} />
+      )}
+    </div>
+  );
+}
+
+function ListBody({ detail, onChange }: { detail: ListDetail; onChange: (d: ListDetail) => void }) {
+  const router = useRouter();
+  const { list, items } = detail;
+  const [mode, setMode] = useState<"" | "rename" | "delete">("");
+  const [name, setName] = useState(list.name);
+  const [description, setDescription] = useState(list.description);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  async function act(work: () => Promise<void>) {
+    setBusy(true);
+    setError("");
+    try {
+      await work();
+    } catch (e) {
+      setError(describeError(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const rename = (e: React.FormEvent) => {
+    e.preventDefault();
+    act(async () => {
+      const done = await editList(list.id, { name: name.trim(), description: description.trim() });
+      onChange({ ...detail, list: done.list });
+      setMode("");
+      await reload();
+    });
+  };
+
+  const remove = () => act(async () => {
+    await deleteList(list.id);
+    await reload();
+    router.push("/lists");
+  });
+
+  const dropItem = (accession: string) => act(async () => {
+    await removeFrom(list.id, accession);
+    onChange({ ...detail, list: { ...list, count: list.count - 1 }, items: items.filter((i) => i.accession !== accession) });
+  });
+
+  const putItem = useCallback((item: Item) => {
+    onChange({ ...detail, items: detail.items.map((i) => (i.accession === item.accession ? item : i)) });
+  }, [detail, onChange]);
+
+  return (
+    <div className="grid gap-10" data-list-page={list.name}>
+      <header className="grid gap-4">
+        <p className="label text-muted-foreground">{list.builtin ? "Built-in list" : "List"}</p>
+        {mode === "rename" ? (
+          <form onSubmit={rename} className="grid max-w-xl gap-3" data-rename>
+            <label htmlFor="list-name" className="label text-muted-foreground">Name</label>
+            <Input id="list-name" value={name} onChange={(e) => setName(e.target.value)} maxLength={LIMITS.name} className="h-9 bg-card" />
+            <label htmlFor="list-description" className="label text-muted-foreground">Description</label>
+            <Textarea id="list-description" value={description} onChange={(e) => setDescription(e.target.value)} maxLength={LIMITS.description} rows={2} className="bg-card" />
+            <div className="flex gap-3">
+              <Button type="submit" disabled={busy || !name.trim()}>{busy ? "Saving…" : "Save"}</Button>
+              <Button type="button" variant="outline" onClick={() => { setMode(""); setName(list.name); setDescription(list.description); }}>Cancel</Button>
+            </div>
+          </form>
+        ) : (
+          <>
+            <h1 className="max-w-4xl font-display text-[34px] leading-[1.08] break-words sm:text-[44px]">{list.name}</h1>
+            {list.description && <p className="max-w-2xl text-[15px] text-muted-foreground">{list.description}</p>}
+          </>
+        )}
+        <div className="flex flex-wrap items-baseline gap-x-5 gap-y-2 border-y border-rule py-3 text-[13px]">
+          <span className="font-mono tabular" data-count={list.count}>{datasets(list.count)}</span>
+          <span className="font-mono tabular text-muted-foreground">updated {day(list.updated_at)}</span>
+          {items.length > 0 && (
+            <>
+              <a href={exportHref(list.id, "accessions")} download className={cn("flex items-center gap-1", MUTED_LINK)}><Download aria-hidden className="size-3.5" />Accessions</a>
+              <a href={exportHref(list.id, "csv")} download className={cn("flex items-center gap-1", MUTED_LINK)}><Download aria-hidden className="size-3.5" />CSV</a>
+            </>
+          )}
+          {!list.builtin && mode === "" && (
+            <>
+              <button type="button" onClick={() => setMode("rename")} className={MUTED_LINK}>Rename</button>
+              <button type="button" onClick={() => setMode("delete")} className={MUTED_LINK}>Delete</button>
+            </>
+          )}
+        </div>
+        {mode === "delete" && (
+          <div role="alertdialog" aria-labelledby="delete-question" className="grid max-w-xl gap-3 border-l-2 border-destructive pl-4 text-[14px]" data-delete-confirm>
+            <p id="delete-question">Delete {list.name} and the {datasets(list.count)} in it? Your notes and tags on them go too. This cannot be undone.</p>
+            <div className="flex gap-3">
+              <Button variant="destructive" disabled={busy} onClick={remove}>{busy ? "Deleting…" : "Delete list"}</Button>
+              <Button variant="outline" onClick={() => setMode("")}>Keep it</Button>
+            </div>
+          </div>
+        )}
+        {error && <p role="alert" className="text-[13px] text-destructive">{error}</p>}
+      </header>
+
+      {items.length === 0 ? (
+        <p className="text-[14px] text-muted-foreground">This list is empty. Save datasets from a search result or a dataset page, and choose this list with the arrow beside Save.</p>
+      ) : (
+        <ol className="-mt-10 grid">
+          {items.map((item) => (
+            <ItemRow key={item.accession} listId={list.id} item={item} onSaved={putItem} onRemove={() => dropItem(item.accession)} />
+          ))}
+        </ol>
+      )}
+    </div>
+  );
+}
+
+function ItemRow({ listId, item, onSaved, onRemove }: { listId: number; item: Item; onSaved: (item: Item) => void; onRemove: () => void }) {
+  const [note, setNote] = useState(item.note);
+  const [tags, setTags] = useState(item.tags.join(", "));
+  const [state, setState] = useState<"" | "saving" | "saved">("");
+  const [error, setError] = useState("");
+  const parsed = parseTags(tags);
+  const dirty = note !== item.note || parsed.join("\n") !== item.tags.join("\n");
+  const tooMany = parsed.length > LIMITS.tags || parsed.some((t) => t.length > LIMITS.tag);
+
+  async function save(e: React.FormEvent) {
+    e.preventDefault();
+    setState("saving");
+    setError("");
+    try {
+      const done = await editItem(listId, item.accession, { note, tags: parsed });
+      onSaved(done.item);
+      setTags(done.item.tags.join(", "));
+      setState("saved");
+    } catch (err) {
+      setError(describeError(err));
+      setState("");
+    }
+  }
+
+  const id = `item-${item.accession}`;
+  return (
+    <li className="grid gap-3 border-b border-rule py-5" data-item={item.accession}>
+      <div className="flex items-start justify-between gap-4">
+        <ItemHead item={item} />
+        <button type="button" onClick={onRemove} className={cn("shrink-0 text-[13px]", MUTED_LINK)} aria-label={`Remove ${item.accession} from this list`}>Remove</button>
+      </div>
+      <form onSubmit={save} className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_16rem] sm:gap-4">
+        <div className="grid content-start gap-1">
+          <label htmlFor={`${id}-note`} className="label text-muted-foreground">Note</label>
+          <Textarea id={`${id}-note`} value={note} onChange={(e) => { setNote(e.target.value); setState(""); }} maxLength={LIMITS.note} rows={2} className="min-h-0 bg-card text-[14px]" />
+        </div>
+        <div className="grid content-start gap-1">
+          <label htmlFor={`${id}-tags`} className="label text-muted-foreground">Tags, separated by commas</label>
+          <Input id={`${id}-tags`} value={tags} onChange={(e) => { setTags(e.target.value); setState(""); }} className="h-9 bg-card" aria-invalid={tooMany || undefined} />
+          {tooMany && <p className="text-[12px] text-warn">At most {LIMITS.tags} tags of {LIMITS.tag} characters each.</p>}
+          <div className="mt-1 flex items-baseline gap-3">
+            <Button type="submit" variant="outline" size="sm" disabled={!dirty || tooMany || state === "saving"}>{state === "saving" ? "Saving…" : "Save"}</Button>
+            <span role="status" className="text-[12px] text-muted-foreground">{state === "saved" && !dirty ? "Saved" : ""}</span>
+          </div>
+          {error && <p role="alert" className="text-[12px] text-destructive">{error}</p>}
+        </div>
+      </form>
+    </li>
+  );
+}

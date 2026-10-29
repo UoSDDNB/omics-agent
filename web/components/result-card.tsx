@@ -10,6 +10,8 @@ import { SAMPLE_TYPE, datasetPath, repositoryName, samplesheet, type Check, type
 import { Evidence, Methods, Ready } from "@/components/row-details";
 import { MASS_SPEC, ProtocolLine } from "@/components/assay";
 import { ProcessPanel } from "@/components/process-panel";
+import { SaveControl } from "@/components/save-control";
+import { hitSnapshot } from "@/lib/lists";
 
 const DATA_TYPE: [RegExp, string][] = [
   [/expression profiling by high throughput sequencing/i, "RNA-seq"],
@@ -268,9 +270,12 @@ export function DatasetRow({ hit, matched, topic, selected, onSelect, branch, co
         </td>
         <td className="min-w-0 py-3 pr-2 align-top">
           <div className="grid min-w-0 gap-1">
-            <Link href={page} onClick={rememberScroll} className="w-fit text-sm leading-snug text-foreground underline decoration-transparent underline-offset-4 transition-colors duration-150 hover:decoration-foreground">
-              {hit.title}
-            </Link>
+            <div className="flex min-w-0 items-start justify-between gap-2">
+              <Link href={page} onClick={rememberScroll} className="w-fit min-w-0 text-sm leading-snug text-foreground underline decoration-transparent underline-offset-4 transition-colors duration-150 hover:decoration-foreground">
+                {hit.title}
+              </Link>
+              <SaveControl accession={hit.accession} snapshot={hitSnapshot(hit, assayOf(hit))} compact />
+            </div>
             <button type="button" onClick={toggle} aria-expanded={expanded} aria-label={`Details of ${hit.accession}`} className="grid w-full min-w-0 cursor-pointer gap-1 text-left">
               <span className="flex min-w-0 flex-wrap items-baseline gap-x-2" title={meta}>
                 <span className="shrink-0 font-mono text-[12px] font-medium text-foreground/80">{shortAccession(hit)}</span>

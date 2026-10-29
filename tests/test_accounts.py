@@ -391,7 +391,9 @@ def test_migrations_are_numbered_and_applied_once(env):
     conn = users.connect()
     try:
         assert users.migrate(conn) == []
-        assert [r[0] for r in conn.execute("SELECT version FROM schema_migrations")] == [1]
+        files = sorted(int(p.name[:3]) for p in users.MIGRATIONS.glob("[0-9][0-9][0-9]_*.sql"))
+        assert files[0] == 1 and files == list(range(1, len(files) + 1))
+        assert [r[0] for r in conn.execute("SELECT version FROM schema_migrations ORDER BY version")] == files
         tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
         assert {"users", "credentials", "sessions", "recovery_codes", "orcid_links", "audit", "challenges"} <= tables
     finally:

@@ -18,7 +18,7 @@ an account does, what locus stores for it, and what is not built yet.
 
 Account data lives in its own SQLite file, `OMICS_USERS_DB` (default `data/users.db`, not in git), never in
 `omics.db`. For each account: the display name and creation time; each passkey's public key, counter, transports,
-creation and last-use times; hashed recovery codes; a linked ORCID iD; sessions (a hash of the cookie token, the
+creation and last-use times; hashed recovery codes; your lists and their items (see below); a linked ORCID iD; sessions (a hash of the cookie token, the
 sign-in method, times and the browser's user-agent string); and a short audit trail of sign-ins and changes. locus runs
 no analytics.
 
@@ -37,7 +37,31 @@ no analytics.
   `LOCUS_DEV_LOGIN=1` and every hop of the request is a loopback address. Never set it on a public server.
 - Errors from account routes have one shape: `{"error": {"code", "message", "transient"}}`.
 
+## Saved datasets and lists
+
+- **Save.** Every search result and dataset page has a Save control. One click keeps the dataset in your built-in
+  list, Saved; a message offers "Add to a list" and Undo. The arrow beside Save opens the list picker, where you tick
+  the lists that should hold the dataset or make a new one.
+- **Lists** (`/lists`) shows every list with its count. A list's page (`/lists/<id>`) keeps datasets in the order you
+  added them. Each dataset has a note and tags, edited in place with one Save. Named lists can be renamed or deleted
+  (after a confirmation); Saved keeps its name and cannot be deleted.
+- **Export.** Each list downloads as plain accessions (one a line) or as CSV with the columns accession, title,
+  repository, organism, data type, samples, note, tags, added. A cell that starts with `=`, `+`, `-` or `@` gets a
+  leading `'` so a spreadsheet shows it as text.
+- **What a list keeps.** Besides the accession, note, tags and the time it was added, each item stores what the page
+  showed when you saved it: title, repository, organism, data type and sample count. A list renders from that copy and
+  never asks a repository; the dataset page has the current record.
+- **Limits.** 100 lists an account (Saved included), 500 datasets a list, names up to 120 characters, descriptions up
+  to 600, notes up to 10,000, and 12 tags of up to 40 characters an item.
+- **Without an account** Save works into this browser only (localStorage `locus:saved`, same item shape, up to 500).
+  `/lists` shows that list and says it lives only in this browser; named lists, notes and tags need an account.
+- **API** (all need a session; changes need JSON and `X-Locus-Intent: 1`): `GET/POST /lists`, `GET/PATCH/DELETE
+  /lists/{id}`, `POST /lists/{id|saved}/items`, `PATCH/DELETE /lists/{id|saved}/items/{accession}`,
+  `GET /lists/{id}/export?format=accessions|csv`. Another account's list answers 404, as a missing one does.
+
 ## Not built yet
 
-Saved lists, following researchers, settings (renaming, adding or removing passkeys, new recovery codes, unlinking
-ORCID, deleting the account) and bringing guest data into an account come in later steps. Email is not used.
+Public lists, following researchers, settings (renaming, adding or removing passkeys, new recovery codes, unlinking
+ORCID, deleting the account) and bringing guest data (this browser's saved datasets and watched searches) into an
+account come in later steps. A list cannot be reordered by hand, and the nf-core sample sheet is not offered for a
+whole list yet. Email is not used.
