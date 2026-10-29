@@ -12,7 +12,9 @@ an account does, what locus stores for it, and what is not built yet.
 - **ORCID.** When the server has an ORCID client (`ORCID_CLIENT_ID`, `ORCID_CLIENT_SECRET`, optional `ORCID_BASE` for
   the sandbox), you can sign in with ORCID or link your iD to an existing account. Without a client the ORCID routes
   answer 404 and the button is hidden. The redirect URI to register with ORCID is `<LOCUS_ORIGIN>/api/account/orcid/callback`.
-- **Signing out** ends the session on the server and removes the cookie.
+  An ORCID attempt can only be finished in the browser that started it, and a link only by the account that started it.
+- **Signing out** ends the session on the server and removes the cookie. Signing in again in the same browser ends the
+  session it had before.
 
 ## What locus stores
 
@@ -30,11 +32,22 @@ no analytics.
   `INTENT_REQUIRED`.
 - Sign-in routes accept at most 10 requests a minute from one address and 100 a minute overall (in-process, so the
   counts reset when the API restarts). Behind the web app's `/api` rewrite the address is read from
-  `X-Forwarded-For`, which a client can forge unless a proxy in front rewrites it; the overall cap still holds.
+  `X-Forwarded-For`, which a client can forge unless a proxy in front rewrites it; the overall cap still holds. A
+  public deployment must have a proxy in front of the web app (the Cloudflare tunnel, Caddy or nginx) that appends the
+  caller's address to `X-Forwarded-For`, because Next's rewrite keeps whatever header the client sent.
 - Passkeys: relying-party id `LOCUS_RP_ID` (default `localhost`) and origin `LOCUS_ORIGIN` (default
-  `http://localhost:3000`) must match the address people use. Each challenge works once and for five minutes.
+  `http://localhost:3000`) must match the address people use. Each challenge works once and for five minutes. User
+  verification (PIN, fingerprint or face) is required when creating a passkey and at every sign-in, and a response
+  without it is refused, since the passkey is the only factor. A refused passkey gets one fixed message; the reason is
+  logged on the server.
+- ORCID: `/account/orcid/start` sets a five-minute HttpOnly cookie `locus_orcid` with a random nonce whose hash is
+  stored with the OAuth state. The callback refuses a browser without the matching cookie, so a forwarded authorize or
+  callback link signs no one in and links nothing. A link attempt also needs the same account to be signed in when
+  ORCID sends the browser back.
 - `POST /account/dev-login` signs in without a passkey for automated page checks. It exists only when
-  `LOCUS_DEV_LOGIN=1` and every hop of the request is a loopback address. Never set it on a public server.
+  `LOCUS_DEV_LOGIN=1` and the API's peer and every hop listed in `X-Forwarded-For` are loopback addresses. Those hops
+  are what the header reports: without a proxy in front that appends the real address, a client can forge them, so the
+  web app must listen on 127.0.0.1 wherever this flag is set (the page gate does). Never set it on a public server.
 - Errors from account routes have one shape: `{"error": {"code", "message", "transient"}}`.
 
 ## Saved datasets and lists

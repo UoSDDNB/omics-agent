@@ -1,12 +1,17 @@
 """Accounts core (F1): sessions, CSRF guard, dev sign-in guard, recovery codes, rate limits, passkeys with a mocked
 verifier, ORCID with a mocked token endpoint, and the shared error shape. No network: every outside call is faked."""
 
+import hashlib
+import json
 from datetime import timedelta
 from types import SimpleNamespace
 from urllib.parse import parse_qs, urlparse
 
+import cbor2
 import httpx
 import pytest
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.asymmetric import ec
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from pydantic import BaseModel
@@ -87,6 +92,19 @@ def test_session_lifecycle_sign_in_me_sign_out(env):
     other = client()
     other.cookies.set("locus_session", token)
     assert other.get("/account/me").json()["user"] is None
+
+
+def test_signing_in_again_ends_the_old_session(env):
+    c = client()
+    dev_login(c, "First")
+    old = c.cookies.get("locus_session")
+    dev_login(c, "Second")
+    assert c.cookies.get("locus_session") != old
+    assert c.get("/account/me").json()["user"]["display_name"] == "Second"
+    assert rows(env, "SELECT count(*) FROM sessions") == [(1,)]
+    stale = client()
+    stale.cookies.set("locus_session", old)
+    assert stale.get("/account/me").json()["user"] is None
 
 
 def test_insecure_cookie_only_when_asked(env, monkeypatch):
@@ -264,6 +282,74 @@ def test_real_verifier_rejects_a_forged_registration(env):
 # ---------------------------------------------------------------- recovery codes
 
 
+class SoftAuthenticator:
+    """A software passkey (ES256, attestation "none") that answers real WebAuthn ceremonies, with or without the user
+    verification flag, so the real verifier in py_webauthn runs end to end."""
+
+    ORIGIN, RP = "http://localhost:3051", "localhost"
+
+    def __init__(self):
+        self.key = ec.generate_private_key(ec.SECP256R1())
+        self.cred_id = b"soft-authenticator-1"
+        self.count = 0
+
+    @staticmethod
+    def b64(data: bytes) -> str:
+        return account.bytes_to_base64url(data)
+
+    def _auth_data(self, uv: bool, attested: bytes = b"") -> bytes:
+        self.count += 1
+        flags = 0x01 | (0x04 if uv else 0) | (0x40 if attested else 0)
+        return hashlib.sha256(self.RP.encode()).digest() + bytes([flags]) + self.count.to_bytes(4, "big") + attested
+
+    def _client_data(self, kind: str, challenge: str) -> bytes:
+        return json.dumps({"type": kind, "challenge": challenge, "origin": self.ORIGIN, "crossOrigin": False}).encode()
+
+    def register(self, options: dict, uv: bool) -> dict:
+        nums = self.key.public_key().public_numbers()
+        cose = cbor2.dumps({1: 2, 3: -7, -1: 1, -2: nums.x.to_bytes(32, "big"), -3: nums.y.to_bytes(32, "big")})
+        attested = bytes(16) + len(self.cred_id).to_bytes(2, "big") + self.cred_id + cose
+        attestation = cbor2.dumps({"fmt": "none", "attStmt": {}, "authData": self._auth_data(uv, attested)})
+        return {"id": self.b64(self.cred_id), "rawId": self.b64(self.cred_id), "type": "public-key",
+                "response": {"clientDataJSON": self.b64(self._client_data("webauthn.create", options["challenge"])),
+                             "attestationObject": self.b64(attestation), "transports": ["internal"]}}
+
+    def sign_in(self, options: dict, uv: bool) -> dict:
+        data, client_data = self._auth_data(uv), self._client_data("webauthn.get", options["challenge"])
+        signature = self.key.sign(data + hashlib.sha256(client_data).digest(), ec.ECDSA(hashes.SHA256()))
+        return {"id": self.b64(self.cred_id), "rawId": self.b64(self.cred_id), "type": "public-key",
+                "response": {"clientDataJSON": self.b64(client_data), "authenticatorData": self.b64(data), "signature": self.b64(signature)}}
+
+
+def test_passkeys_require_user_verification(env):
+    c, device = client(), SoftAuthenticator()
+    # Registration: the options ask for verification, and a response without it creates nothing.
+    opts = c.post("/account/register/options", json={"display_name": "Grace"}, headers=INTENT).json()
+    assert opts["options"]["authenticatorSelection"]["userVerification"] == "required"
+    r = c.post("/account/register/verify", json={"challenge_id": opts["challenge_id"], "credential": device.register(opts["options"], uv=False)}, headers=INTENT)
+    assert r.status_code == 400 and r.json()["error"]["code"] == "PASSKEY_REJECTED"
+    no_uv_message = r.json()["error"]["message"]
+    assert rows(env, "SELECT count(*) FROM users") == [(0,)] and c.get("/account/me").json()["user"] is None
+    opts = c.post("/account/register/options", json={"display_name": "Grace"}, headers=INTENT).json()
+    r = c.post("/account/register/verify", json={"challenge_id": opts["challenge_id"], "credential": device.register(opts["options"], uv=True)}, headers=INTENT)
+    assert r.status_code == 200 and r.json()["user"]["passkeys"] == 1
+    c.post("/account/sign-out", json={}, headers=INTENT)
+    # Sign-in: the same passkey without verification is refused; with it, it signs in.
+    opts = c.post("/account/login/options", json={}, headers=INTENT).json()
+    assert opts["options"]["userVerification"] == "required"
+    r = c.post("/account/login/verify", json={"challenge_id": opts["challenge_id"], "credential": device.sign_in(opts["options"], uv=False)}, headers=INTENT)
+    assert r.status_code == 400 and r.json()["error"]["code"] == "PASSKEY_REJECTED"
+    assert c.get("/account/me").json()["user"] is None
+    opts = c.post("/account/login/options", json={}, headers=INTENT).json()
+    r = c.post("/account/login/verify", json={"challenge_id": opts["challenge_id"], "credential": device.sign_in(opts["options"], uv=True)}, headers=INTENT)
+    assert r.status_code == 200 and r.json()["user"]["display_name"] == "Grace"
+    # The browser learns only that the passkey was refused, never which check failed.
+    forged = {"id": "AAAA", "rawId": "AAAA", "type": "public-key", "response": {"clientDataJSON": "e30", "attestationObject": "oA"}}
+    opts = c.post("/account/register/options", json={"display_name": "Mallory"}, headers=INTENT).json()
+    other = c.post("/account/register/verify", json={"challenge_id": opts["challenge_id"], "credential": forged}, headers=INTENT)
+    assert other.json()["error"]["message"] == no_uv_message
+
+
 def test_recovery_code_signs_in_once(env, monkeypatch):
     c, calls = client(), []
     codes = register(c, monkeypatch, calls)[1].json()["recovery_codes"]
@@ -374,6 +460,53 @@ def test_orcid_callback_with_a_bad_state_or_failed_exchange(env, orcid, monkeypa
     monkeypatch.setattr(account, "orcid_client", lambda: httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(500))))
     assert c.get("/account/orcid/callback", params={"state": state, "code": "x"}).headers["location"] == "/account?orcid=failed"
     assert c.get("/account/me").json()["user"] is None
+
+
+def orcid_authorize(c, to="/account"):
+    """Starts an ORCID attempt in browser `c`; returns the state ORCID would send back."""
+    start = c.get("/account/orcid/start", params={"to": to})
+    assert start.status_code == 302 and "locus_orcid=" in start.headers["set-cookie"] and "HttpOnly" in start.headers["set-cookie"]
+    return parse_qs(urlparse(start.headers["location"]).query)["state"][0]
+
+
+def test_orcid_attempt_only_finishes_in_the_browser_that_started_it(env, orcid):
+    # Login CSRF: the attacker starts as a guest and sends the callback link (their state and code) to the victim.
+    attacker, victim = client(), client()
+    state = orcid_authorize(attacker)
+    back = victim.get("/account/orcid/callback", params={"state": state, "code": "attacker-code"})
+    assert back.headers["location"] == "/account?orcid=failed"
+    assert victim.get("/account/me").json()["user"] is None
+    # A victim holding a cookie from their own attempt is refused too: the cookie must belong to this state.
+    orcid_authorize(victim)
+    assert victim.get("/account/orcid/callback", params={"state": state, "code": "attacker-code"}).headers["location"] == "/account?orcid=failed"
+    assert victim.get("/account/me").json()["user"] is None
+    assert orcid.requests == [] and rows(env, "SELECT count(*) FROM orcid_links") == [(0,)]
+    # Identity hijack: a signed-in attacker's link attempt, finished by a signed-in victim, links nothing.
+    uid = dev_login(attacker, "Attacker").json()["user"]["id"]
+    dev_login(victim, "Victim")
+    state = orcid_authorize(attacker)
+    assert victim.get("/account/orcid/callback", params={"state": state, "code": "victim-code"}).headers["location"] == "/account?orcid=failed"
+    assert orcid.requests == [] and rows(env, "SELECT count(*) FROM orcid_links") == [(0,)]
+    # The attacker's own browser can still finish its own attempt, and the cookie is cleared afterwards.
+    assert attacker.get("/account/orcid/callback", params={"state": state, "code": "abc"}).headers["location"] == "/account?orcid=linked"
+    assert rows(env, "SELECT user_id FROM orcid_links") == [(uid,)]
+    assert attacker.cookies.get("locus_orcid") is None
+
+
+def test_orcid_link_must_be_finished_by_the_account_that_started_it(env, orcid):
+    c = client()
+    dev_login(c, "Ada")
+    state = orcid_authorize(c)
+    c.post("/account/sign-out", json={}, headers=INTENT)
+    other = dev_login(c, "Bob").json()["user"]["id"]
+    assert c.get("/account/orcid/callback", params={"state": state, "code": "abc"}).headers["location"] == "/account?orcid=failed"
+    assert rows(env, "SELECT count(*) FROM orcid_links") == [(0,)] and orcid.requests == []
+    assert c.get("/account/me").json()["user"]["id"] == other
+    # Signed out entirely, the link attempt cannot become a sign-in either.
+    state = orcid_authorize(c)
+    c.post("/account/sign-out", json={}, headers=INTENT)
+    assert c.get("/account/orcid/callback", params={"state": state, "code": "abc"}).headers["location"] == "/account?orcid=failed"
+    assert c.get("/account/me").json()["user"] is None and rows(env, "SELECT count(*) FROM orcid_links") == [(0,)]
 
 
 # ---------------------------------------------------------------- shared error shape, migrations

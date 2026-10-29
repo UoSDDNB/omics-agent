@@ -184,8 +184,11 @@ def cookie_secure() -> bool:
     return os.environ.get("LOCUS_COOKIE_INSECURE") != "1"
 
 
-def start_session(conn: sqlite3.Connection, response: Response, user_id: int, method: str, user_agent: str = "") -> None:
-    """Creates a session and sets its cookie: a random 32-byte token in the browser, its SHA-256 in the DB."""
+def start_session(conn: sqlite3.Connection, response: Response, user_id: int, method: str, user_agent: str = "", previous: str | None = None) -> None:
+    """Creates a session and sets its cookie: a random 32-byte token in the browser, its SHA-256 in the DB. `previous` is
+    the session cookie the browser came with, if any: that session ends, since the browser is about to lose its token."""
+    if previous:
+        conn.execute("DELETE FROM sessions WHERE token_sha256 = ?", (sha256(previous),))
     token = secrets.token_urlsafe(32)
     t = now()
     conn.execute(
@@ -270,7 +273,9 @@ SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
 
 def require_intent(request: Request) -> None:
     """State-changing requests must say so: header X-Locus-Intent: 1 and a JSON body (on top of SameSite=Lax). A
-    cross-site form cannot set either, and a cross-site fetch that sets them needs a CORS preflight we never grant."""
+    cross-site form cannot set either, and a fetch from another origin that sets them needs a CORS preflight. The API
+    grants that preflight only to locus's own local front ends (api.py: localhost:3000 and :3020); any other origin's
+    preflight fails."""
     if request.method in SAFE_METHODS:
         return
     kind = request.headers.get("content-type", "").split(";")[0].strip().lower()

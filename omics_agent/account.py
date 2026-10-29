@@ -3,6 +3,7 @@ the local dev sign-in for page checks, who am I, and sign out. Shared machinery 
 errors) is in users.py."""
 
 import json
+import logging
 import os
 import re
 import secrets
@@ -23,6 +24,8 @@ from .users import ApiError, Db, User, auth_rate_limit, iso, now
 
 router = APIRouter(prefix="/account", tags=["account"], dependencies=[Depends(users.require_intent)])
 CHALLENGE_TTL = timedelta(minutes=5)
+ORCID_COOKIE = "locus_orcid"  # ties an ORCID attempt to the browser that started it
+log = logging.getLogger(__name__)
 RP_NAME = "locus"
 
 
@@ -81,7 +84,7 @@ def sign_out(request: Request, response: Response, _: Empty | None = None) -> di
 
 
 def _signed_in(conn, response: Response, request: Request, user_id: int, method: str) -> dict:
-    users.start_session(conn, response, user_id, method, request.headers.get("user-agent", ""))
+    users.start_session(conn, response, user_id, method, request.headers.get("user-agent", ""), request.cookies.get(users.COOKIE))
     row = conn.execute("SELECT display_name, created_at FROM users WHERE id = ?", (user_id,)).fetchone()
     return User(user_id, row["display_name"], row["created_at"], method, iso(now())).public(conn)
 
@@ -110,7 +113,7 @@ def register_options(body: RegisterOptionsIn) -> dict:
     handle = secrets.token_urlsafe(32)
     options = generate_registration_options(
         rp_id=rp_id(), rp_name=RP_NAME, user_name=name, user_id=base64url_to_bytes(handle), user_display_name=name,
-        authenticator_selection=AuthenticatorSelectionCriteria(resident_key=ResidentKeyRequirement.REQUIRED, user_verification=UserVerificationRequirement.PREFERRED),
+        authenticator_selection=AuthenticatorSelectionCriteria(resident_key=ResidentKeyRequirement.REQUIRED, user_verification=UserVerificationRequirement.REQUIRED),
     )
     with Db() as conn:
         cid = _put_challenge(conn, "register", options.challenge, payload={"display_name": name, "handle": handle})
@@ -125,9 +128,9 @@ def register_verify(body: CredentialIn, request: Request, response: Response) ->
         row = _take_challenge(conn, body.challenge_id, "register")
     try:
         verified = verify_registration_response(credential=body.credential, expected_challenge=base64url_to_bytes(row["challenge"]),
-                                                expected_rp_id=rp_id(), expected_origin=origin())
+                                                expected_rp_id=rp_id(), expected_origin=origin(), require_user_verification=True)
     except (InvalidRegistrationResponse, ValueError, KeyError, TypeError) as error:
-        raise ApiError(400, "PASSKEY_REJECTED", f"The passkey could not be verified: {error}")
+        raise _passkey_rejected("registration", error)
     payload = json.loads(row["payload"])
     transports = (body.credential.get("response") or {}).get("transports") or []
     with Db() as conn:
@@ -136,6 +139,12 @@ def register_verify(body: CredentialIn, request: Request, response: Response) ->
         codes = users.new_recovery_codes(conn, user_id)
         user = _signed_in(conn, response, request, user_id, "passkey")
     return {"user": user, "recovery_codes": codes}
+
+
+def _passkey_rejected(step: str, error: Exception) -> ApiError:
+    """The library's reason goes to the server log only; the browser gets one fixed message."""
+    log.info("passkey %s rejected: %s: %s", step, type(error).__name__, error)
+    return ApiError(400, "PASSKEY_REJECTED", "The passkey could not be verified. Please try again, and unlock it with your PIN, fingerprint or face when asked.")
 
 
 def add_credential(conn, user_id: int, verified, transports: list, nickname: str = "") -> None:
@@ -151,7 +160,7 @@ def add_credential(conn, user_id: int, verified, transports: list, nickname: str
 @router.post("/login/options", dependencies=[Depends(auth_rate_limit)])
 def login_options(_: Empty | None = None) -> dict:
     """Starts a passkey sign-in. No account name is asked for: the browser offers the passkeys it holds for this site."""
-    options = generate_authentication_options(rp_id=rp_id(), user_verification=UserVerificationRequirement.PREFERRED,
+    options = generate_authentication_options(rp_id=rp_id(), user_verification=UserVerificationRequirement.REQUIRED,
                                               allow_credentials=[])
     with Db() as conn:
         cid = _put_challenge(conn, "login", options.challenge)
@@ -169,9 +178,10 @@ def login_verify(body: CredentialIn, request: Request, response: Response) -> di
         raise ApiError(400, "PASSKEY_UNKNOWN", "locus does not know this passkey. It may belong to an account that was deleted.")
     try:
         verified = verify_authentication_response(credential=body.credential, expected_challenge=base64url_to_bytes(row["challenge"]), expected_rp_id=rp_id(),
-                                                  expected_origin=origin(), credential_public_key=stored["public_key"], credential_current_sign_count=stored["sign_count"])
+                                                  expected_origin=origin(), credential_public_key=stored["public_key"], credential_current_sign_count=stored["sign_count"],
+                                                  require_user_verification=True)
     except (InvalidAuthenticationResponse, ValueError, KeyError, TypeError) as error:
-        raise ApiError(400, "PASSKEY_REJECTED", f"The passkey could not be verified: {error}")
+        raise _passkey_rejected("sign-in", error)
     with Db() as conn:
         conn.execute("UPDATE credentials SET sign_count = ?, last_used_at = ? WHERE credential_id = ?", (verified.new_sign_count, iso(now()), credential_id))
         return {"user": _signed_in(conn, response, request, stored["user_id"], "passkey")}
@@ -243,36 +253,52 @@ def _need_orcid() -> None:
 
 @router.get("/orcid/start", dependencies=[Depends(auth_rate_limit)])
 def orcid_start(to: str = "/account", user: User | None = Depends(users.optional_user)) -> RedirectResponse:
-    """Sends the browser to ORCID to sign in, or to link an ORCID iD to the signed-in account."""
+    """Sends the browser to ORCID to sign in, or to link an ORCID iD to the signed-in account. The attempt is tied to
+    this browser by a five-minute HttpOnly cookie holding a random nonce; only its hash is stored with the state, and
+    the callback refuses a browser without it (RFC 6749 s10.12)."""
     _need_orcid()
-    state = secrets.token_urlsafe(24)
+    state, nonce = secrets.token_urlsafe(24), secrets.token_urlsafe(24)
     with Db() as conn:
-        _put_challenge(conn, "orcid", state, user.id if user else None, {"to": safe_return(to)})
+        _put_challenge(conn, "orcid", state, user.id if user else None, {"to": safe_return(to), "nonce_sha256": users.sha256(nonce)})
     query = urlencode({"client_id": os.environ["ORCID_CLIENT_ID"], "response_type": "code", "scope": "/authenticate",
                        "redirect_uri": orcid_redirect_uri(), "state": state})
-    return RedirectResponse(f"{orcid_base()}/oauth/authorize?{query}", status_code=302)
+    response = RedirectResponse(f"{orcid_base()}/oauth/authorize?{query}", status_code=302)
+    response.set_cookie(ORCID_COOKIE, nonce, max_age=int(CHALLENGE_TTL.total_seconds()), path="/", httponly=True, samesite="lax", secure=users.cookie_secure())
+    return response
 
 
 def _orcid_back(to: str, outcome: str) -> RedirectResponse:
     sep = "&" if "?" in to else "?"
-    return RedirectResponse(f"{to}{sep}orcid={outcome}", status_code=302)
+    response = RedirectResponse(f"{to}{sep}orcid={outcome}", status_code=302)
+    response.delete_cookie(ORCID_COOKIE, path="/", httponly=True, samesite="lax", secure=users.cookie_secure())
+    return response
 
 
 @router.get("/orcid/callback", dependencies=[Depends(auth_rate_limit)])
 def orcid_callback(request: Request, state: str = "", code: str = "", error: str = "") -> RedirectResponse:
-    """ORCID sends the browser back here. Links the iD when the attempt began signed in; otherwise signs in the account
-    the iD is linked to, or creates one. Always ends in a redirect to where the user started, with ?orcid=<outcome>
-    (linked, signed-in, in-use, cancelled, expired, failed)."""
+    """ORCID sends the browser back here. Links the iD when the attempt began signed in (and the same account is still
+    signed in); otherwise signs in the account the iD is linked to, or creates one. Only the browser that started the
+    attempt can finish it. Always ends in a redirect to where the user started, with ?orcid=<outcome> (linked,
+    signed-in, in-use, cancelled, expired, failed)."""
     _need_orcid()
+    nonce = request.cookies.get(ORCID_COOKIE, "")
     with Db() as conn:
-        row = conn.execute("SELECT id FROM challenges WHERE kind = 'orcid' AND challenge = ?", (state,)).fetchone() if state else None
+        found = conn.execute("SELECT id, payload FROM challenges WHERE kind = 'orcid' AND challenge = ?", (state,)).fetchone() if state else None
+        if found and not (nonce and secrets.compare_digest(json.loads(found["payload"]).get("nonce_sha256", ""), users.sha256(nonce))):
+            # Another browser's attempt (a forwarded authorize or callback link): refuse it and leave it untouched.
+            log.info("orcid callback refused: the browser did not start this attempt")
+            return _orcid_back("/account", "failed")
         try:
-            row = _take_challenge(conn, row["id"] if row else "", "orcid")
+            row = _take_challenge(conn, found["id"] if found else "", "orcid")
         except ApiError:
             return _orcid_back("/account", "expired")
     to = json.loads(row["payload"]).get("to", "/account")
     if error or not code:
         return _orcid_back(to, "cancelled")
+    if row["user_id"] is not None:
+        signed_in = users.optional_user(request, Response())
+        if signed_in is None or signed_in.id != row["user_id"]:
+            return _orcid_back(to, "failed")
     try:
         with orcid_client() as client:
             answer = client.post(f"{orcid_base()}/oauth/token", headers={"Accept": "application/json"}, data={
@@ -280,7 +306,8 @@ def orcid_callback(request: Request, state: str = "", code: str = "", error: str
                 "grant_type": "authorization_code", "code": code, "redirect_uri": orcid_redirect_uri()})
         answer.raise_for_status()
         token = answer.json()
-    except (httpx.HTTPError, ValueError):
+    except (httpx.HTTPError, ValueError) as failure:
+        log.info("orcid token exchange failed: %s", failure)
         return _orcid_back(to, "failed")
     orcid = str(token.get("orcid") or "") if isinstance(token, dict) else ""
     if not ORCID_ID.match(orcid):
@@ -303,5 +330,5 @@ def orcid_callback(request: Request, state: str = "", code: str = "", error: str
             conn.execute("INSERT INTO orcid_links (user_id, orcid, linked_at) VALUES (?, ?, ?)", (user_id, orcid, iso(now())))
             users.audit(conn, user_id, "orcid linked")
         response = _orcid_back(to, "signed-in")
-        users.start_session(conn, response, user_id, "orcid", request.headers.get("user-agent", ""))
+        users.start_session(conn, response, user_id, "orcid", request.headers.get("user-agent", ""), request.cookies.get(users.COOKIE))
     return response
