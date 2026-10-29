@@ -15,12 +15,14 @@ from pydantic import BaseModel, Field, StringConstraints
 
 load_dotenv()
 
-from . import agent, assay, browse, design, design_check, everywhere, lists, paper, person, preview, process, qc, record, resolve, sources, subset, table, volcano, why  # noqa: E402  (needs the API key loaded first)
+from . import agent, assay, browse, design, design_check, everywhere, lists, paper, person, preview, process, qc, record, resolve, sources, subset, table, users, volcano, why  # noqa: E402  (needs the API key loaded first)
 
 HEARTBEAT = 10
 
 app = FastAPI(title="omics-agent")
 app.add_middleware(CORSMiddleware, allow_origins=["http://localhost:3000", "http://localhost:3020"], allow_methods=["*"], allow_headers=["*"])
+# Accounts: /account/* routes and the shared {"error": {...}} shape (users.py holds sessions, CSRF guard, rate limits).
+users.install(app)
 
 
 class SearchIn(BaseModel):
@@ -390,6 +392,7 @@ def main() -> None:
 
     from . import index
 
+    users.connect().close()  # create or migrate the users DB (OMICS_USERS_DB) before serving
     # Load the embedding model and vectors before serving, so the first search does not pay for it.
     index.semantic_search("warm up", ["GEO"], "", 1)
     # OMICS_API_PORT lets the API move off 8000 when that port is taken; the web app's OMICS_API_URL must match.
