@@ -299,6 +299,52 @@ def remove_item(list_ref: str, accession: str, _: Empty | None = None, user: Use
     return {"list_id": list_id, "ok": True}
 
 
+# ---------------------------------------------------------------- bringing a guest's Saved into the account (F3)
+
+
+class ImportIn(BaseModel):
+    """What a browser kept as a guest (localStorage `locus:saved`), sent in one request. Each item passes the same
+    checks as a single save; the batch holds at most one full list."""
+
+    items: list[ItemIn] = Field(max_length=MAX_ITEMS)
+
+
+@router.post("/saved/import")
+def import_saved(body: ImportIn, user: User = Depends(users.current_user)) -> dict:
+    """Adds a guest's saved datasets to the built-in Saved list, in the order the browser kept them, in one transaction.
+
+    Idempotent: an accession Saved already holds (or one repeated in the batch) is not added again, and its note, tags
+    and snapshot in the account are left as they are. When Saved would pass 500 items, the ones that fit are added and
+    the rest are reported in "left_out". "held" lists every accession of the batch that Saved now holds, so the browser
+    knows exactly which local copies it may drop."""
+    with Db() as conn:
+        list_id = saved_list_id(conn, user.id)
+        have = {r["accession"] for r in conn.execute("SELECT accession FROM list_items WHERE list_id = ?", (list_id,))}
+        room = MAX_ITEMS - len(have)
+        t = iso(users.now())
+        added: list[str] = []
+        already: list[str] = []
+        left_out: list[str] = []
+        for item in body.items:
+            if item.accession in have or item.accession in added or item.accession in left_out:
+                if item.accession in have and item.accession not in already:
+                    already.append(item.accession)
+                continue
+            if room <= 0:
+                left_out.append(item.accession)
+                continue
+            conn.execute(
+                "INSERT INTO list_items (list_id, accession, added_at, note, tags, snapshot) VALUES (?, ?, ?, ?, ?, ?)",
+                (list_id, item.accession, t, item.note, json.dumps(item.tags), item.snapshot.model_dump_json()),
+            )
+            added.append(item.accession)
+            room -= 1
+        if added:
+            _touch(conn, list_id)
+            users.audit(conn, user.id, f"imported {len(added)} saved datasets from a browser")
+    return {"list_id": list_id, "added": added, "already": already, "left_out": left_out, "held": added + already}
+
+
 # ---------------------------------------------------------------- export
 
 CSV_COLUMNS = ["accession", "title", "repository", "organism", "data type", "samples", "note", "tags", "added"]

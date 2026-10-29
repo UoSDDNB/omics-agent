@@ -182,6 +182,37 @@ export async function newList(name: string): Promise<ListSummary> {
   return done.list;
 }
 
+// ---------------------------------------------------------------- bringing guest saves into the account (F3)
+
+export type ImportResult = { list_id: number; added: string[]; already: string[]; left_out: string[]; held: string[] };
+
+const text = (v: unknown, max: number) => (typeof v === "string" ? v.slice(0, max) : "");
+
+// Only the fields the API keeps, trimmed to its limits, so one odd entry in localStorage cannot refuse the whole batch.
+function importable(i: Item) {
+  const s = (i.snapshot ?? {}) as Partial<Snapshot>;
+  const samples = typeof s.samples === "number" && Number.isInteger(s.samples) && s.samples >= 0 ? s.samples : null;
+  const tags = Array.isArray(i.tags) ? [...new Set(i.tags.map((t) => text(t, LIMITS.tag).trim()).filter(Boolean))].slice(0, LIMITS.tags) : [];
+  return {
+    accession: i.accession.trim(),
+    note: text(i.note, LIMITS.note),
+    tags,
+    snapshot: { title: text(s.title, 1000), source: text(s.source, 60), organism: text(s.organism, 500), modality: text(s.modality, 500), samples },
+  };
+}
+
+// Sends this browser's Saved to the account's Saved in one request. Local copies are removed only for the accessions
+// the server says it now holds; anything it could not take stays in this browser.
+export async function importGuestSaved(): Promise<ImportResult> {
+  const items = guestItems();
+  const done = await call<ImportResult>("POST", "/lists/saved/import", { items: items.map(importable) });
+  const held = new Set(done.held);
+  writeGuest(guestItems().filter((i) => !held.has(i.accession.trim())));
+  stale = true;
+  await reload();
+  return done;
+}
+
 // Tags typed as "HEK293, riboseq" become ["HEK293", "riboseq"].
 export const parseTags = (text: string) => [...new Set(text.split(",").map((t) => t.trim()).filter(Boolean))];
 

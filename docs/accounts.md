@@ -72,9 +72,28 @@ no analytics.
   /lists/{id}`, `POST /lists/{id|saved}/items`, `PATCH/DELETE /lists/{id|saved}/items/{accession}`,
   `GET /lists/{id}/export?format=accessions|csv`. Another account's list answers 404, as a missing one does.
 
+## Bringing this browser's saves into an account
+
+- **When.** After you sign in, if this browser still holds datasets you saved as a guest, a panel at the top of the
+  page says how many saved datasets and watched searches it has and asks whether to add them to your account. It
+  appears only when there is at least one saved dataset.
+- **Add** sends every saved dataset to your account's Saved list in one request, in the order you saved them.
+  Adding twice changes nothing: a dataset Saved already holds keeps its note, tags and details. The browser's copies
+  are removed only for the datasets the server confirms it now holds. If Saved would pass 500 datasets, the ones that
+  fit are added and the rest stay in this browser, and the panel says how many.
+- **Not now** leaves everything in this browser (it shows on Lists whenever you are signed out) and is remembered for
+  this browser and this account (localStorage `locus:import-declined`, a list of account ids). Another account signing
+  in from the same browser is asked again.
+- **Watched searches** are counted in the panel but stay in this browser (localStorage `locus:watched`) until the
+  account can keep them (F4, which adds the server table and a numbered users-DB migration for them). F3 adds no
+  table and no migration; the panel's Add covers saved datasets only.
+- **API:** `POST /lists/saved/import` with `{"items": [{accession, snapshot, note?, tags?}, …]}`, at most 500 items,
+  each checked exactly as a single save (accession format, snapshot fields bounded, note, tags); one invalid item
+  refuses the whole batch with 422 and adds nothing. The answer lists `added`, `already`, `left_out` and `held`
+  (added plus already). Needs a session, JSON and `X-Locus-Intent: 1`.
+
 ## Not built yet
 
 Public lists, following researchers, settings (renaming, adding or removing passkeys, new recovery codes, unlinking
-ORCID, deleting the account) and bringing guest data (this browser's saved datasets and watched searches) into an
-account come in later steps. A list cannot be reordered by hand, and the nf-core sample sheet is not offered for a
+ORCID, deleting the account) and watched searches kept in an account come in later steps. A list cannot be reordered by hand, and the nf-core sample sheet is not offered for a
 whole list yet. Email is not used.
