@@ -47,7 +47,7 @@ export const PRIVACY_FACTS: PrivacyFact[] = [
     body: [
       "Account data lives in its own database file on the server that runs locus, apart from the public dataset catalogue. It is not shared or sold.",
       "Like most web servers, the server's request log records your IP address, the time and the address of each page or search you open. How long it is kept depends on how the server is set up; it is not part of the account data and deleting an account does not touch it.",
-      "The limit on sign-in attempts holds your address in memory for one minute and never writes it down.",
+      "The limits on sign-in attempts and on researcher-page lookups, which apply to guests too, hold your address in memory only and never write it down. An address is dropped the next time that limit is checked after a minute has passed, and every address is forgotten when the server restarts.",
       "An ORCID sign-in asks ORCID only for your iD and name. To show what is new from the people you follow, the server looks up their ORCID iDs in Europe PMC; your own identity is not part of that request.",
     ],
   },

@@ -34,7 +34,11 @@ const ON_INK = "underline decoration-background/40 underline-offset-4 transition
 
 export function Toaster() {
   const shown = useSyncExternalStore(subscribe, () => current, () => null);
-  const [held, setHeld] = useState(false);
+  // A hold belongs to one toast: hovering or focusing a toast holds only that toast, so the next one clears itself
+  // even if the pointer never left the last (F8-r1-1: one mouse click on Undo used to stop every later toast clearing).
+  const [heldId, setHeldId] = useState<number | null>(null);
+  const held = shown != null && heldId === shown.id;
+  const setHeld = (on: boolean) => setHeldId(on && shown ? shown.id : null);
   const box = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
