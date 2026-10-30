@@ -161,3 +161,27 @@ def test_deleting_a_published_list_withdraws_it(env):
     share = call(owner, "POST", f"/lists/{lid}/publish", {}).json()["list"]["public"]["share_id"]
     assert call(owner, "DELETE", f"/lists/{lid}").status_code == 200
     assert guest().get(f"/public/lists/{share}").status_code == 404
+
+
+def test_a_change_in_the_same_second_as_publish_is_stale(env, monkeypatch):
+    # F6-r1-1: the clock stands still, so updated_at == published_at; the change counter still tells.
+    frozen = users.now()
+    monkeypatch.setattr(users, "now", lambda: frozen)
+    owner = signed_in()
+    lid = make_list(owner, n=1)
+    call(owner, "POST", f"/lists/{lid}/publish", {})
+    assert call(owner, "GET", f"/lists/{lid}").json()["list"]["public"]["stale"] is False
+    call(owner, "POST", f"/lists/{lid}/items", {"accession": "GSE77", "snapshot": SNAP})
+    summary = call(owner, "GET", f"/lists/{lid}").json()["list"]
+    assert summary["updated_at"] == summary["public"]["published_at"] and summary["public"]["stale"] is True
+    assert call(owner, "POST", f"/lists/{lid}/publish", {}).json()["list"]["public"]["stale"] is False
+    # Each kind of change marks it: a note, removing an item, the description; a PATCH that changes nothing does not.
+    for method, url, body in [("PATCH", f"/lists/{lid}/items/GSE77", {"note": "n"}), ("DELETE", f"/lists/{lid}/items/GSE77", {}),
+                              ("PATCH", f"/lists/{lid}", {"description": "new words"})]:
+        assert call(owner, method, url, body).status_code == 200
+        assert call(owner, "GET", f"/lists/{lid}").json()["list"]["public"]["stale"] is True
+        call(owner, "POST", f"/lists/{lid}/publish", {})
+    assert call(owner, "PATCH", f"/lists/{lid}", {"description": "new words"}).json()["list"]["public"]["stale"] is False
+    # Stop sharing, then publish again: fresh.
+    call(owner, "DELETE", f"/lists/{lid}/publish", {})
+    assert call(owner, "POST", f"/lists/{lid}/publish", {}).json()["list"]["public"]["stale"] is False

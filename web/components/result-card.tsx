@@ -144,11 +144,12 @@ function Grains({ facts }: { facts: Facts }) {
 }
 
 // A native checkbox, restyled: the box fills with ink and the tick draws itself in.
-export function Checkbox({ checked, mixed = false, onChange, label }: { checked: boolean; mixed?: boolean; onChange: () => void; label: string }) {
+export function Checkbox({ checked, mixed = false, onChange, label, id }: { checked: boolean; mixed?: boolean; onChange: () => void; label: string; id?: string }) {
   return (
     <label className="relative mt-[2px] grid size-4 cursor-pointer place-items-center before:absolute before:-inset-3 before:content-['']">
       <input
         type="checkbox"
+        id={id}
         checked={checked}
         ref={(el) => { if (el) el.indeterminate = mixed; }}
         onChange={onChange}

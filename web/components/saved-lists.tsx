@@ -1,5 +1,5 @@
 "use client";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { ChevronLeft, Download } from "lucide-react";
@@ -325,12 +325,24 @@ function Sharing({ list, onChange }: { list: ListSummary; onChange: (l: ListSumm
   const [copied, setCopied] = useState(false);
   const [said, setSaid] = useState("");
   const max = LIMITS.public_items ?? 50;
+  // Keyboard focus after the controls swap (F6-r1-2): into the form when it opens; to the share link after Publish,
+  // Update or Cancel; to "Share a public link" after Stop sharing. Set just before the swap, used once after it.
+  const focusNext = useRef<"" | "form" | "link" | "open">("");
+  const box = useRef<HTMLElement>(null);
+  useEffect(() => {
+    const target = focusNext.current;
+    if (!target) return;
+    focusNext.current = "";
+    const sel = target === "form" ? "[data-share-form] input[type=checkbox]" : target === "link" ? "[data-share-link]" : "[data-share-open]";
+    box.current?.querySelector<HTMLElement>(sel)?.focus();
+  });
 
   async function act(work: () => Promise<{ list: ListSummary }>, message: string) {
     setBusy(true);
     setError("");
     try {
       const done = await work();
+      focusNext.current = done.list.public ? "link" : "open";
       onChange(done.list);
       setOpen(false);
       setSaid(message);
@@ -351,38 +363,35 @@ function Sharing({ list, onChange }: { list: ListSummary; onChange: (l: ListSumm
       <p className="text-muted-foreground">
         Anyone with the link can see this list’s name, description and {list.count > max ? `the first ${max} of its datasets` : "its datasets"}, as they are when you publish. Tags stay private. The link cannot be guessed and is listed nowhere.
       </p>
+      {/* The words toggle the box too (F6-r1-3): each is a <label> for the checkbox's id. */}
       <span className="flex items-start gap-3">
-        <Checkbox checked={showOwner} onChange={() => setShowOwner((v) => !v)} label="Show my display name" />
-        <span>Show my display name</span>
+        <Checkbox id={`share-owner-${list.id}`} checked={showOwner} onChange={() => setShowOwner((v) => !v)} label="Show my display name" />
+        <label htmlFor={`share-owner-${list.id}`} className="cursor-pointer" data-share-choice="owner">Show my display name</label>
       </span>
       <span className="flex items-start gap-3">
-        <Checkbox checked={includeNotes} onChange={() => setIncludeNotes((v) => !v)} label="Include my notes" />
-        <span>Include my notes</span>
+        <Checkbox id={`share-notes-${list.id}`} checked={includeNotes} onChange={() => setIncludeNotes((v) => !v)} label="Include my notes" />
+        <label htmlFor={`share-notes-${list.id}`} className="cursor-pointer" data-share-choice="notes">Include my notes</label>
       </span>
       <div className="flex gap-3">
         <Button disabled={busy} onClick={publish}>{busy ? "Publishing…" : pub ? "Update public page" : "Publish"}</Button>
-        <Button variant="outline" disabled={busy} onClick={() => setOpen(false)}>Cancel</Button>
+        <Button variant="outline" disabled={busy} onClick={() => { focusNext.current = pub ? "link" : "open"; setOpen(false); }}>Cancel</Button>
       </div>
     </div>
   );
 
   return (
-    <section aria-label="Sharing" className="grid gap-3 text-[13px]" data-sharing={pub ? "public" : "private"}>
+    <section ref={box} aria-label="Sharing" className="grid gap-3 text-[13px]" data-sharing={pub ? "public" : "private"}>
       <p className="sr-only" role="status" aria-live="polite">{said}</p>
       {pub ? (
         <>
-          <p className="flex min-w-0 flex-wrap items-baseline gap-x-2 gap-y-1">
+          {/* Spaced by gap rather than "·" text, so a wrapped line never starts with a stray separator (F6-r1-4). */}
+          <p className="flex min-w-0 flex-wrap items-baseline gap-x-4 gap-y-1">
             <span className="label text-muted-foreground">Public</span>
-            <a href={url} className={cn("min-w-0 truncate font-mono text-[12px]", LINK)} data-share-link>{url}</a>
-            <span className="text-muted-foreground" aria-hidden>·</span>
+            <a href={url} className={cn("min-w-0 max-w-full truncate font-mono text-[12px]", LINK)} data-share-link>{url}</a>
             <button type="button" onClick={copy} onBlur={() => setCopied(false)} className={MUTED_LINK}>{copied ? "Copied" : "Copy"}</button>
-            <span className="text-muted-foreground" aria-hidden>·</span>
             <button type="button" disabled={busy} onClick={stop} className={MUTED_LINK} data-unpublish>Stop sharing</button>
             {!open && (
-              <>
-                <span className="text-muted-foreground" aria-hidden>·</span>
-                <button type="button" onClick={() => setOpen(true)} className={MUTED_LINK}>Change what it shows</button>
-              </>
+              <button type="button" onClick={() => { focusNext.current = "form"; setOpen(true); }} className={MUTED_LINK} data-share-change>Change what it shows</button>
             )}
           </p>
           <p className="font-mono text-[12px] tabular text-muted-foreground">
@@ -397,7 +406,7 @@ function Sharing({ list, onChange }: { list: ListSummary; onChange: (l: ListSumm
         </>
       ) : !open && (
         <p>
-          <button type="button" onClick={() => setOpen(true)} className={MUTED_LINK} data-share-open>Share a public link</button>
+          <button type="button" onClick={() => { focusNext.current = "form"; setOpen(true); }} className={MUTED_LINK} data-share-open>Share a public link</button>
         </p>
       )}
       {open && choices}

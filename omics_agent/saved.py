@@ -158,10 +158,11 @@ def _summary(row) -> dict:
     return {
         "id": row["id"], "name": row["name"], "description": row["description"], "builtin": bool(row["is_builtin"]),
         "count": row["count"], "created_at": row["created_at"], "updated_at": row["updated_at"],
-        # Only the owner ever sees this summary. "stale": the list changed after the public page was last updated.
+        # Only the owner ever sees this summary. "stale": the list changed after the public page was last updated, told by
+        # the list's change counter (rev) against the one stored at publish, never by comparing timestamps.
         "public": None if shared is None else {
             "share_id": row["share_id"], "published_at": row["published_at"], "show_owner": shared["show_owner"],
-            "include_notes": shared["include_notes"], "stale": row["updated_at"] > row["published_at"],
+            "include_notes": shared["include_notes"], "stale": row["rev"] != row["published_rev"],
         },
     }
 
@@ -180,7 +181,8 @@ def _own(conn, user_id: int, list_id: int):
 
 
 def _touch(conn, list_id: int) -> None:
-    conn.execute("UPDATE lists SET updated_at = ? WHERE id = ?", (iso(users.now()), list_id))
+    """Records a change to a list or its items: a new updated_at and the next rev (what the stale check compares)."""
+    conn.execute("UPDATE lists SET updated_at = ?, rev = rev + 1 WHERE id = ?", (iso(users.now()), list_id))
 
 
 def _item(row) -> dict:
@@ -240,14 +242,18 @@ def one_list(list_id: int, user: User = Depends(users.current_user)) -> dict:
 def edit_list(list_id: int, body: ListPatch, user: User = Depends(users.current_user)) -> dict:
     with Db() as conn:
         row = _own(conn, user.id, list_id)
+        changed = False
         if body.name is not None and body.name != row["name"]:
             if row["is_builtin"]:
                 raise ApiError(400, "BUILTIN_LIST", "The Saved list keeps its name.")
             _name_free(conn, user.id, body.name, but=list_id)
             conn.execute("UPDATE lists SET name = ? WHERE id = ?", (body.name, list_id))
-        if body.description is not None:
+            changed = True
+        if body.description is not None and body.description.strip() != row["description"]:
             conn.execute("UPDATE lists SET description = ? WHERE id = ?", (body.description.strip(), list_id))
-        _touch(conn, list_id)
+            changed = True
+        if changed:
+            _touch(conn, list_id)
         return {"list": _summary(_own(conn, user.id, list_id))}
 
 
@@ -348,7 +354,7 @@ def publish(list_id: int, body: PublishIn, user: User = Depends(users.current_us
             "show_owner": body.show_owner, "include_notes": body.include_notes, "count": len(items), "items": items[:PUBLIC_ITEMS],
         }
         share_id = row["share_id"] or secrets.token_hex(16)
-        conn.execute("UPDATE lists SET share_id = ?, published_at = ?, share_snapshot = ? WHERE id = ?",
+        conn.execute("UPDATE lists SET share_id = ?, published_at = ?, share_snapshot = ?, published_rev = rev WHERE id = ?",
                      (share_id, iso(t), json.dumps(shared), list_id))
         users.audit(conn, user.id, PUBLISHED + str(list_id))
         return {"list": _summary(_own(conn, user.id, list_id))}
@@ -360,7 +366,7 @@ def unpublish(list_id: int, _: Empty | None = None, user: User = Depends(users.c
     with Db() as conn:
         row = _own(conn, user.id, list_id)
         if row["share_id"]:
-            conn.execute("UPDATE lists SET share_id = NULL, published_at = NULL, share_snapshot = NULL WHERE id = ?", (list_id,))
+            conn.execute("UPDATE lists SET share_id = NULL, published_at = NULL, share_snapshot = NULL, published_rev = NULL WHERE id = ?", (list_id,))
             users.audit(conn, user.id, f"stopped sharing list {list_id}")
         return {"list": _summary(_own(conn, user.id, list_id))}
 
