@@ -10,9 +10,10 @@ only case where the page offers Follow) only when all of these hold:
   name past that belongs to several people);
 - the ORCID is tagged on at least MIN_CLAIMED of those papers and on more than half of the papers that tag any
   ORCID on the matching author;
-- the ORCID record's own public name (ORCID public API) agrees with the page's name: same surname, the same first
-  given name when both spell it out, and compatible initials otherwise. When ORCID does not answer in time, the
-  answer is "unconfirmed" (could not confirm) and kept 5 minutes only.
+- the ORCID record's own public name (ORCID public API) agrees with the page's name (names_agree; docs/accounts.md
+  "Names that agree" has the rule with examples). When ORCID does not answer in time, the answer is "unconfirmed"
+  (could not confirm) and kept NO_RECORD_SECONDS only; when locus's own ORCID pace is full, PaceTimeout passes up as
+  503 busy and nothing is kept.
 
 Otherwise the answer is "several" (shared, or common), "none" (no tags) or "unconfirmed" (too few tags, the record is
 someone else's, or the record could not be read). What a followed person brings is the datasets locus holds that
@@ -22,7 +23,8 @@ first, each marked new until the account marks it seen.
 Bounds: 200 follows an account; one /updates call reads at most 40 of them (newest follows first) on one shared pool of
 4 workers, within 45 seconds overall, at most once per account every UPDATES_EVERY seconds (in between it answers
 from the cache), with one fetch per ORCID however many accounts ask at once. Answers are kept 6 hours per ORCID,
-failures 5 minutes. /person/identity is rate-limited per caller and overall, and every upstream call goes through
+failures 5 minutes; at most UPDATES_AT_ONCE fresh /updates calls run at once. New follows are limited per account
+(FOLLOW_LIMIT). /person/identity is rate-limited per caller and overall for uncached answers only, and every upstream call goes through
 pace.py (Europe PMC at most 5 a second, ORCID at most 2 a second, app-wide, with a 2 s cap on any wait).
 Sessions, the CSRF guard and the error shape come from users.py.
 """
@@ -50,6 +52,7 @@ FETCH_WORKERS = 4
 FETCH_SECONDS = 45.0
 CACHE_SECONDS = 6 * 3600
 FAIL_SECONDS = 5 * 60
+NO_RECORD_SECONDS = 20  # ORCID failed or timed out: says nothing about the record, so kept only moments
 UPDATES_EVERY = 10.0
 ORCID_SECONDS = 5.0
 NAME_MAX = 200
@@ -61,9 +64,14 @@ MIN_CLAIMED = 3
 LIMITS = {"follows": MAX_FOLLOWS, "checked": FETCH_MAX, "seen": SEEN_MAX}
 ORCID_ID = re.compile(r"^\d{4}-\d{4}-\d{4}-\d{3}[\dX]$")
 
-# Unauthenticated person reads, per caller address and overall, a minute.
+# Unauthenticated person reads that need upstream work (cache misses only), per caller address (an IPv6 caller by its
+# /64) and overall, a minute. Cached answers cost nothing upstream and are not counted.
 IDENTITY_LIMIT = users.RateLimiter(per_ip=30, overall=240)
 PERSON_LIMIT = users.RateLimiter(per_ip=30, overall=240)
+# Follows made, per account and overall, a minute: each new follow reads one ORCID record.
+FOLLOW_LIMIT = users.RateLimiter(per_ip=30, overall=600)
+# Fresh /updates calls under way at once, app-wide; one more is refused at once with 503 (each holds a server thread).
+UPDATES_AT_ONCE = 8
 
 
 def valid_orcid(value: str) -> bool:
@@ -93,6 +101,7 @@ def clear_caches() -> None:
     LAST_UPDATES.clear()
     IDENTITY_LIMIT.reset()
     PERSON_LIMIT.reset()
+    FOLLOW_LIMIT.reset()
 
 
 # ---------------------------------------------------------------- who a name is
@@ -123,8 +132,9 @@ def _surname(words: list[str]) -> str:
 
 def names_agree(page: str, given: str | None, family: str | None) -> bool:
     """Whether a page's name and a record's given and family names can be the same person: the same surname (accents and
-    case aside), the same first given name when both spell it out (then middle initials may be missing on one side),
-    and otherwise initials that agree (initials_agree)."""
+    case aside), then the same first given name when both spell it out (middle initials may be missing on one side);
+    for a page in Europe PMC's form against a record that spells its first name, the record's initials must be the
+    page's or their start; otherwise initials that agree (initials_agree)."""
     if not family or not given:
         return False
     query = person.author_query(page)
@@ -142,16 +152,32 @@ def names_agree(page: str, given: str | None, family: str | None) -> bool:
         if page_first != record_first:
             return False
         return len(page_initials) == 1 or len(record_initials) == 1 or initials_agree(page_initials, record_initials)
+    if record_first and not split:
+        # The page is in Europe PMC's form ("Thoreen CC", what a paper's author list links to) and the record spells its
+        # first given name ("Carson Thoreen"): the record may leave out middle initials the page carries, never the
+        # reverse, and the first initial must be the same. "Thoreen CC" agrees with "Carson Thoreen" and "Carson C
+        # Thoreen", not with "Carson J Thoreen"; "Thoreen C" does not agree with "Carson C Thoreen".
+        return page_initials.startswith(record_initials)
     return initials_agree(page_initials, record_initials)
 
 
 def orcid_record(orcid: str) -> dict | None:
-    """The public name on an ORCID record, {"given", "family", "credit", "display"} (each possibly None), kept 6 hours;
-    None when ORCID does not answer within ORCID_SECONDS (not kept)."""
+    """The public name on an ORCID record, {"given", "family", "credit", "display"} (each possibly None), kept 6 hours.
+    A record ORCID says does not exist (404) comes back with every name None and "missing" set, kept FAIL_SECONDS.
+    None when ORCID fails or does not answer within ORCID_SECONDS (not kept: that says nothing about the record).
+    PaceTimeout (locus itself is busy) passes through, so callers answer "busy" and keep nothing."""
     if (hit := RECORDS.get(orcid)) is not None:
         return hit
     try:
         name = pace.orcid_get(f"/{orcid}/person", timeout=ORCID_SECONDS, deadline=time.monotonic() + ORCID_SECONDS).get("name") or {}
+    except pace.PaceTimeout:
+        raise
+    except httpx.HTTPStatusError as error:
+        if error.response.status_code in (404, 410):
+            out = {"given": None, "family": None, "credit": None, "display": None, "missing": True}
+            RECORDS.put(orcid, out, FAIL_SECONDS)
+            return out
+        return None
     except (httpx.HTTPError, ValueError, AttributeError):
         return None
     given, family = (name.get("given-names") or {}).get("value"), (name.get("family-name") or {}).get("value")
@@ -169,10 +195,12 @@ def record_agrees(page: str, record: dict) -> bool:
     return bool(split) and names_agree(page, " ".join(split[0]), " ".join(split[1]))
 
 
-def identity(name: str) -> dict:
+def identity(name: str, admit=None) -> dict:
     """Which ORCID a person page's name stands for, judged from the name's newest 100 papers (see the module doc).
     status: "one" (orcid set), "several" (reason "shared" or "common"), "none", "unconfirmed" (reason "few",
-    "other_name" or "no_record") or "no_name". httpx errors (PaceTimeout among them) pass through."""
+    "other_name" or "no_record") or "no_name". httpx errors (PaceTimeout among them) pass through. `admit`, when
+    given, is called only before upstream work (a cache miss), so cached answers never count against a rate limit.
+    Every answer is kept except "no_record", which is kept NO_RECORD_SECONDS only."""
     query = person.author_query(name)
     if not query:
         return {"name": name, "status": "no_name"}
@@ -180,6 +208,8 @@ def identity(name: str) -> dict:
     key = f"{query}|{(_spelled(split[0][0]) if split and split[0] else '') or ''}"
     if (hit := IDENTITIES.get(key)) is not None:
         return hit | {"name": name}
+    if admit is not None:
+        admit()
     with pace.UPSTREAM:
         out, seconds = _identity(name, query)
     IDENTITIES.put(key, out, seconds)
@@ -213,7 +243,7 @@ def _identity(name: str, query: str) -> tuple[dict, float]:
         return out | {"status": "unconfirmed", "reason": "few"}, CACHE_SECONDS
     record = orcid_record(top)
     if record is None:
-        return out | {"status": "unconfirmed", "reason": "no_record"}, FAIL_SECONDS
+        return out | {"status": "unconfirmed", "reason": "no_record"}, NO_RECORD_SECONDS
     out["orcid_name"] = record["display"]
     if not record_agrees(name, record):
         return out | {"status": "unconfirmed", "reason": "other_name"}, CACHE_SECONDS
@@ -262,6 +292,7 @@ def work(orcid: str, deadline: float | None = None) -> dict:
 POOL = ThreadPoolExecutor(max_workers=FETCH_WORKERS, thread_name_prefix="follows")
 INFLIGHT: dict[str, Future] = {}
 INFLIGHT_LOCK = threading.RLock()
+UPDATES_GATE = pace.Gate(UPDATES_AT_ONCE)
 
 
 def _fetch(orcid: str, deadline: float) -> Future:
@@ -298,6 +329,15 @@ class OrcidIn(BaseModel):
 
 class FollowIn(OrcidIn):
     display_name: str | None = Field(default=None, max_length=NAME_MAX)  # accepted for older clients, not used
+    # The person page's name the follow was made from ("Thoreen CC", "Carson C Thoreen"), so /following links back to
+    # the page that names this ORCID. Only ever shown to the account that made the follow.
+    page_name: str | None = Field(default=None, max_length=120)
+
+    @field_validator("page_name")
+    @classmethod
+    def _page_name(cls, value: str | None) -> str | None:
+        value = " ".join((value or "").split())
+        return value if len(value) >= 3 and person.author_query(value) else None
 
 
 class SeenIn(OrcidIn):
@@ -317,7 +357,8 @@ class SeenIn(OrcidIn):
 
 
 def _follow(row) -> dict:
-    return {"orcid": row["orcid"], "display_name": row["display_name"], "followed_at": row["followed_at"], "seen": json.loads(row["seen"])}
+    return {"orcid": row["orcid"], "display_name": row["display_name"], "page_name": row["page_name"], "followed_at": row["followed_at"],
+            "seen": json.loads(row["seen"])}
 
 
 def _rows(user_id: int) -> list:
@@ -334,13 +375,24 @@ def all_follows(user: User = Depends(users.current_user)) -> dict:
 @router.post("")
 def follow(body: FollowIn, response: Response, user: User = Depends(users.current_user)) -> dict:
     """Follows a person by ORCID (201); following someone already followed changes nothing (200). The name kept is the
-    one on the ORCID record, read here; the client's display_name is not used."""
+    one on the ORCID record, read here; the client's display_name is not used. The duplicate and the 200-follow checks
+    come before the ORCID read, and an account may make at most FOLLOW_LIMIT.per_ip follows a minute, so no account can
+    spend the app-wide ORCID pace that person pages need."""
     with Db() as conn:
         if conn.execute("SELECT 1 FROM follows WHERE user_id = ? AND kind = 'person' AND orcid = ?", (user.id, body.orcid)).fetchone():
             return {"added": False}
-    record = orcid_record(body.orcid)
+        if conn.execute("SELECT count(*) FROM follows WHERE user_id = ?", (user.id,)).fetchone()[0] >= MAX_FOLLOWS:
+            raise ApiError(409, "LIMIT_REACHED", f"An account follows at most {MAX_FOLLOWS} people. Unfollow someone to make room.")
+    FOLLOW_LIMIT.check(f"account:{user.id}")
+    try:
+        record = orcid_record(body.orcid)
+    except pace.PaceTimeout:
+        raise ApiError(503, "BUSY", "locus is reading ORCID for many people at once. Please try again in a few seconds.", transient=True,
+                       headers={"Retry-After": str(pace.RETRY_AFTER)})
     if record is None:
         raise ApiError(503, "UPSTREAM_FAILED", "ORCID did not answer, so locus could not confirm whose record this is. Please try again.", transient=True)
+    if record.get("missing"):
+        raise ApiError(404, "ORCID_NOT_FOUND", "ORCID has no record with this iD.")
     if not record["display"]:
         raise ApiError(422, "ORCID_NO_NAME", "This ORCID record shows no public name, so locus cannot follow it.")
     with Db() as conn:
@@ -349,8 +401,8 @@ def follow(body: FollowIn, response: Response, user: User = Depends(users.curren
             return {"added": False}
         if conn.execute("SELECT count(*) FROM follows WHERE user_id = ?", (user.id,)).fetchone()[0] >= MAX_FOLLOWS:
             raise ApiError(409, "LIMIT_REACHED", f"An account follows at most {MAX_FOLLOWS} people. Unfollow someone to make room.")
-        conn.execute("INSERT INTO follows (user_id, kind, orcid, display_name, followed_at) VALUES (?, 'person', ?, ?, ?)",
-                     (user.id, body.orcid, record["display"][:NAME_MAX], iso(users.now())))
+        conn.execute("INSERT INTO follows (user_id, kind, orcid, display_name, page_name, followed_at) VALUES (?, 'person', ?, ?, ?, ?)",
+                     (user.id, body.orcid, record["display"][:NAME_MAX], body.page_name, iso(users.now())))
     response.status_code = 201
     return {"added": True, "display_name": record["display"][:NAME_MAX]}
 
@@ -387,12 +439,22 @@ def updates(user: User = Depends(users.current_user)) -> dict:
     with INFLIGHT_LOCK:
         fresh = t - LAST_UPDATES.get(user.id, -UPDATES_EVERY) >= UPDATES_EVERY
         if fresh:
+            for key in [k for k, v in LAST_UPDATES.items() if t - v >= UPDATES_EVERY]:
+                del LAST_UPDATES[key]
             LAST_UPDATES[user.id] = t
     answers: dict[str, tuple[str, dict | None]] = {}
-    if fresh:
-        deadline = t + FETCH_SECONDS
-        futures = {_fetch(r["orcid"], deadline): r["orcid"] for r in rows[:FETCH_MAX]}
-        wait(futures, timeout=FETCH_SECONDS)
+    if fresh and rows:
+        try:
+            with UPDATES_GATE:
+                deadline = t + FETCH_SECONDS
+                futures = {_fetch(r["orcid"], deadline): r["orcid"] for r in rows[:FETCH_MAX]}
+                wait(futures, timeout=FETCH_SECONDS)
+        except pace.PaceTimeout:
+            with INFLIGHT_LOCK:
+                if LAST_UPDATES.get(user.id) == t:
+                    del LAST_UPDATES[user.id]
+            raise ApiError(503, "BUSY", "locus is checking followed people for many accounts at once. Please try again in a few seconds.",
+                           transient=True, headers={"Retry-After": str(pace.RETRY_AFTER)})
         for future, orcid in futures.items():
             if not future.done() or isinstance(future.exception(), pace.PaceTimeout):
                 answers[orcid] = ("late", None)
@@ -419,10 +481,11 @@ def updates(user: User = Depends(users.current_user)) -> dict:
 @public.get("/person/identity")
 def person_identity(request: Request, name: str = Query(min_length=3, max_length=120)) -> dict:
     """Which ORCID a contributor's name stands for, as Europe PMC's ORCID tags and the ORCID record show it (see
-    identity()). At most 30 a minute from one address and 240 overall; 503 with Retry-After when locus is busy."""
-    IDENTITY_LIMIT.check(users.client_ip(request))
+    identity()). Answers that need upstream work: at most 30 a minute from one address (an IPv6 /64) and 240 overall;
+    cached answers are not counted. 503 with Retry-After when locus is busy."""
+    ip = users.client_ip(request)
     try:
-        return identity(name)
+        return identity(name, admit=lambda: IDENTITY_LIMIT.check(ip))
     except pace.PaceTimeout:
         raise ApiError(503, "BUSY", "locus is reading Europe PMC for many people at once. Please try again in a few seconds.", transient=True,
                        headers={"Retry-After": str(pace.RETRY_AFTER)})

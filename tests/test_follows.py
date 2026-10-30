@@ -53,6 +53,7 @@ class Upstream:
         self.active = self.peak = 0
         self.names: dict[str, tuple[str, str]] = {}
         self.extra: dict[str, tuple[list, int]] = {}
+        self.missing: set[str] = set()
 
     def get(self, url, params=None, headers=None, timeout=None):
         with self.lock:
@@ -72,7 +73,10 @@ class Upstream:
         if "/orcid/" in url:
             if "orcid" in self.fail:
                 return httpx.Response(503, json={}, request=request)
-            given, family = self.names.get(url.split("/orcid/")[1].split("/")[0], ("Carson", "Thoreen"))
+            orcid = url.split("/orcid/")[1].split("/")[0]
+            if orcid in self.missing:
+                return httpx.Response(404, json={}, request=request)
+            given, family = self.names.get(orcid, ("Carson", "Thoreen"))
             body = {"name": {"given-names": {"value": given}, "family-name": {"value": family}, "credit-name": None}}
             return httpx.Response(200, json=body, request=request)
         query = params["query"]
@@ -229,6 +233,10 @@ def test_names_agree():
     assert not agree("Carson C Thoreen", "Carson", "Thorne")
     assert agree("Thoreen CC", "C. C.", "Thoreen") and not agree("Thoreen CC", "C.", "Thoreen")  # "C" is not "CC"
     assert agree("Thoreen CC", "C. C. T.", "Thoreen")
+    # F5-r2-1: the Europe PMC form against a record that spells the given name and leaves out the middle initial.
+    assert agree("Thoreen CC", "Carson", "Thoreen") and agree("Thoreen CC", "Carson C", "Thoreen")
+    assert not agree("Thoreen CC", "Carson J", "Thoreen") and not agree("Thoreen CC", "Kevin", "Thoreen")
+    assert not agree("Thoreen C", "Carson C", "Thoreen")  # the record may lack initials the page has, never the reverse
     assert not agree("Carson C Thoreen", None, "Thoreen")
     assert follows.initials_agree("CC", "CCT") and not follows.initials_agree("C", "CC") and not follows.initials_agree("JS", "JP")
 
@@ -241,9 +249,10 @@ def test_an_unreadable_orcid_record_means_no_follow_and_is_kept_briefly(up, monk
     up.fail.clear()
     n = len(up.calls)
     assert c.get("/person/identity", params={"name": "Carson C Thoreen"}).json()["status"] == "unconfirmed"
-    assert len(up.calls) == n  # kept, but only for FAIL_SECONDS
+    assert len(up.calls) == n  # kept, but only for NO_RECORD_SECONDS (moments)
+    assert follows.NO_RECORD_SECONDS <= 30
     t = time.monotonic()
-    monkeypatch.setattr(pace.time, "monotonic", lambda: t + follows.FAIL_SECONDS + 1)
+    monkeypatch.setattr(pace.time, "monotonic", lambda: t + follows.NO_RECORD_SECONDS + 1)
     assert c.get("/person/identity", params={"name": "Carson C Thoreen"}).json()["status"] == "one"
 
 
@@ -284,9 +293,12 @@ def test_person_page_route_is_limited_and_cached(up, monkeypatch):
     monkeypatch.setattr(follows.PERSON_LIMIT, "per_ip", 3)
     assert c.get("/person", params={"name": "Carson C Thoreen"}).json()["matched"] == 42
     n = len(up.calls)
-    assert c.get("/person", params={"name": "Carson C Thoreen"}).status_code == 200 and len(up.calls) == n  # kept
-    assert c.get("/person", params={"name": "Carson C Thoreen"}).status_code == 200
-    assert c.get("/person", params={"name": "Carson C Thoreen"}).status_code == 429
+    for _ in range(10):  # kept, and cached answers are not counted against the limit
+        assert c.get("/person", params={"name": "Carson C Thoreen"}).status_code == 200 and len(up.calls) == n
+    assert c.get("/person", params={"name": "Ann Person"}).status_code == 200
+    assert c.get("/person", params={"name": "Bob Person"}).status_code == 200
+    assert c.get("/person", params={"name": "Cid Person"}).status_code == 429  # the fourth uncached read
+    assert c.get("/person", params={"name": "Carson C Thoreen"}).status_code == 200  # cached: still answered
     follows.clear_caches()
     pace.EUROPE_PMC.next = time.monotonic() + 30
     r = c.get("/person", params={"name": "Carson C Thoreen"})
@@ -378,6 +390,7 @@ def orcids(n):
 
 
 def test_updates_read_at_most_40_follows_4_at_a_time_and_cache_them(up, monkeypatch):
+    monkeypatch.setattr(follows.FOLLOW_LIMIT, "per_ip", 1000)  # following 45 at once is this test's setup, not a flood
     monkeypatch.setattr(follows, "MAX_FOLLOWS", 50)
     c = signed_in()
     many = orcids(41)
@@ -533,3 +546,148 @@ def test_every_europe_pmc_and_orcid_call_is_paced(up, monkeypatch):
     monkeypatch.setattr(pace, "ORCID", Counting("orcid"))
     TestClient(make_app(), client=LOCAL).get("/person/identity", params={"name": "Carson C Thoreen"})
     assert taken.count("epmc") == 2 and taken.count("orcid") == 1 and len(up.calls) == 3
+
+
+# ---------------------------------------------------------------- fix round 2
+
+
+def test_the_europe_pmc_form_from_a_paper_page_finds_the_orcid(up):
+    # F5-r2-1: paper pages link 'Thoreen CC'; the ORCID record says 'Carson Thoreen' (no middle initial).
+    c = TestClient(make_app(), client=LOCAL)
+    got = c.get("/person/identity", params={"name": "Thoreen CC"}).json()
+    assert got["status"] == "one" and got["orcid"] == THOREEN and got["claimed"] == 5 and got["orcid_name"] == "Carson Thoreen"
+    # A record with another middle initial is someone else.
+    up.names[THOREEN] = ("Carson J", "Thoreen")
+    follows.clear_caches()
+    got = c.get("/person/identity", params={"name": "Thoreen CC"}).json()
+    assert got["status"] == "unconfirmed" and got["reason"] == "other_name"
+    # A record whose first initial differs is someone else too.
+    up.names[THOREEN] = ("Kevin", "Thoreen")
+    follows.clear_caches()
+    assert c.get("/person/identity", params={"name": "Thoreen CC"}).json()["reason"] == "other_name"
+
+
+def test_the_europe_pmc_form_keeps_the_round_one_refusals(up):
+    # 'Thoreen CC' page: a 'Thoreen C' with another ORCID tags 3 papers and even calls itself Carson; Carson CC's tags 2.
+    results = [paper(f"11{i}", "2024", [author("Thoreen", "C", YANG)]) for i in range(3)] + [paper(f"12{i}", "2023", [author("Thoreen", "CC", YU)]) for i in range(2)]
+    got = identity_of(up, "Thoreen CC", "Thoreen CC", results, 42, {YANG: ("Carson", "Thoreen"), YU: ("Carson", "Thoreen")})
+    assert got["status"] == "unconfirmed" and got["reason"] == "few" and got["orcid"] == YU and got["tagged"] == 2
+    # 'Zhang Y' with Yang's ORCID on 3 of 5 tagged papers is not common here, and Yang's record spells Yang: the page
+    # in Europe PMC's form cannot tell Yu from Yang, so the majority and the 3-paper floor decide; with 120 hits a
+    # two-way split under the floor stays unconfirmed.
+    results = [paper(f"5{i}", "2024", [author("Zhang", "Y", YANG)]) for i in range(2)] + [paper(f"6{i}", "2023", [author("Zhang", "Y", YU)]) for i in range(2)]
+    got = identity_of(up, "Zhang Y", "Zhang Y", results, 120, {YANG: ("Yang", "Zhang"), YU: ("Yu", "Zhang")})
+    assert got["status"] == "several" and got["reason"] == "shared"
+    results = [paper("801", "2024", [author("Wang", "W", YANG)])] + [paper(f"9{i:02d}", "2023", [author("Wang", "W")]) for i in range(99)]
+    got = identity_of(up, "Wang W", "Wang W", results, 48000, {YANG: ("Wei", "Wang")})
+    assert got["status"] == "several" and got["reason"] == "common"
+
+
+def test_following_remembers_the_page_it_was_made_from(up):
+    # F5-r2-2: /following links back to the page's name, not the ORCID record's.
+    c = signed_in()
+    assert call(c, "POST", "/follows/people", {"orcid": THOREEN, "page_name": "Thoreen  CC"}).status_code == 201
+    got = c.get("/follows/people").json()["follows"][0]
+    assert got["page_name"] == "Thoreen CC" and got["display_name"] == "Carson Thoreen"
+    assert c.get("/follows/people/updates").json()["people"][0]["page_name"] == "Thoreen CC"
+    assert call(c, "POST", "/follows/people", {"orcid": SMITH_A, "page_name": "x"}).status_code == 201  # not a name: dropped
+    assert {f["orcid"]: f["page_name"] for f in c.get("/follows/people").json()["follows"]}[SMITH_A] is None
+    assert call(c, "POST", "/follows/people", {"orcid": SMITH_B, "page_name": "y" * 121}).status_code == 422
+
+
+def test_a_follow_flood_cannot_switch_off_identity(up, monkeypatch):
+    # F5-r2-3: one account posting many ORCIDs is limited per account, and the limit and duplicate checks read nothing.
+    c = signed_in()
+    ids = orcids(follows.FOLLOW_LIMIT.per_ip + 5)
+    codes = [call(c, "POST", "/follows/people", {"orcid": o}).status_code for o in ids]
+    assert codes[: follows.FOLLOW_LIMIT.per_ip] == [201] * follows.FOLLOW_LIMIT.per_ip and set(codes[follows.FOLLOW_LIMIT.per_ip:]) == {429}
+    n = len(up.calls)
+    assert call(c, "POST", "/follows/people", {"orcid": ids[0]}).status_code == 200 and len(up.calls) == n  # duplicate: no read
+    monkeypatch.setattr(follows, "MAX_FOLLOWS", 2)
+    follows.FOLLOW_LIMIT.reset()
+    r = call(c, "POST", "/follows/people", {"orcid": THOREEN})
+    assert r.status_code == 409 and len(up.calls) == n  # full: no read
+    # Another reader's identity still answers.
+    assert TestClient(make_app(), client=LOCAL).get("/person/identity", params={"name": "Carson C Thoreen"}).json()["status"] == "one"
+
+
+def test_a_busy_orcid_pace_is_busy_and_never_kept(up, monkeypatch):
+    # F5-r2-3: when locus's own ORCID pace is full, identity answers 503 BUSY and keeps nothing for other readers.
+    clock = FakeClock()
+    monkeypatch.setattr(pace, "ORCID", pace.Pace(2, clock=clock, sleep=clock.sleep))
+    pace.ORCID.next = clock.t + 30
+    c = TestClient(make_app(), client=LOCAL)
+    r = c.get("/person/identity", params={"name": "Carson C Thoreen"})
+    assert r.status_code == 503 and r.json()["error"]["code"] == "BUSY"
+    signed = signed_in()
+    r = call(signed, "POST", "/follows/people", {"orcid": SMITH_A})
+    assert r.status_code == 503 and r.json()["error"]["code"] == "BUSY"
+    pace.ORCID.reset()
+    clock.t += 31
+    assert c.get("/person/identity", params={"name": "Carson C Thoreen"}).json()["status"] == "one"
+
+
+def test_an_orcid_that_does_not_exist_is_refused_and_kept_briefly(up):
+    up.missing.add(SMITH_A)
+    c = signed_in()
+    r = call(c, "POST", "/follows/people", {"orcid": SMITH_A})
+    assert r.status_code == 404 and r.json()["error"]["code"] == "ORCID_NOT_FOUND"
+    n = len(up.calls)
+    assert call(c, "POST", "/follows/people", {"orcid": SMITH_A}).status_code == 404 and len(up.calls) == n
+
+
+def test_cached_identity_answers_cost_no_limit_and_ipv6_counts_by_64(up):
+    # F5-r2-4: 260 cached hits from distinct addresses leave the limit untouched.
+    c = TestClient(make_app(), client=LOCAL)
+    for i in range(260):
+        r = c.get("/person/identity", params={"name": "Carson C Thoreen"}, headers={"X-Forwarded-For": f"2001:db8:{i:x}::1"})
+        assert r.status_code == 200
+    # Uncached reads from one /64 share one bucket however the last 64 bits vary.
+    follows.clear_caches()
+    per = follows.IDENTITY_LIMIT.per_ip
+    codes = [c.get("/person/identity", params={"name": f"Ann Person{i:03d}"}, headers={"X-Forwarded-For": f"2001:db8:1:2::{i:x}"}).status_code
+             for i in range(per + 2)]
+    assert codes[:per] == [200] * per and set(codes[per:]) == {429}
+    assert c.get("/person/identity", params={"name": "Ann Other"}, headers={"X-Forwarded-For": "2001:db8:1:3::1"}).status_code == 200
+    assert users.limit_key("203.0.113.7") == "203.0.113.7" and users.limit_key("::ffff:203.0.113.7") == "203.0.113.7"
+    assert users.limit_key("2001:db8:1:2:aaaa::1") == "2001:db8:1:2::/64" and users.limit_key("account:7") == "account:7"
+
+
+def test_updates_calls_at_once_are_capped_with_a_fast_503(up, monkeypatch):
+    # F5-r2-8
+    c = signed_in()
+    call(c, "POST", "/follows/people", {"orcid": THOREEN})
+    monkeypatch.setattr(follows, "UPDATES_GATE", pace.Gate(1))
+    with follows.UPDATES_GATE:
+        start = time.monotonic()
+        r = c.get("/follows/people/updates")
+        assert r.status_code == 503 and r.json()["error"]["code"] == "BUSY" and time.monotonic() - start < 1
+    assert c.get("/follows/people/updates").json()["people"][0]["status"] == "ok"  # the refused call did not throttle
+    follows.LAST_UPDATES[-1] = time.monotonic() - 2 * follows.UPDATES_EVERY
+    follows.LAST_UPDATES.pop(next(k for k in follows.LAST_UPDATES if k != -1))
+    c.get("/follows/people/updates")
+    assert -1 not in follows.LAST_UPDATES  # old entries are pruned
+
+
+def test_busy_is_not_mistaken_for_a_failure_on_paper_routes(up, monkeypatch):
+    # F5-r2-5: /cite says busy, and a busy moment never keeps empty supplementary sizes.
+    from omics_agent import api, paper
+
+    pace.EUROPE_PMC.next = time.monotonic() + 30
+    r = TestClient(api.app, client=LOCAL).get("/cite", params={"q": "Thoreen 2012 Nature mTOR"})
+    assert r.status_code == 503 and r.headers["Retry-After"]
+    pace.EUROPE_PMC.reset()
+    paper._zip_sizes.cache_clear()
+    answers = iter([pace.PaceTimeout("busy"), {"a.xlsx": 10}])
+
+    def sizes(read, tail=0):
+        got = next(answers)
+        if isinstance(got, Exception):
+            raise got
+        return got
+
+    monkeypatch.setattr(paper, "directory_sizes", sizes)
+    with pytest.raises(pace.PaceTimeout):
+        paper._zip_sizes("PMC1")
+    assert paper._zip_sizes("PMC1") == {"a.xlsx": 10}
+    paper._zip_sizes.cache_clear()

@@ -150,7 +150,7 @@ function Person({ person: p, onChange }: { person: FollowedPerson; onChange: () 
     <li className="grid gap-3" data-followed={p.orcid}>
       <div className="flex flex-wrap items-baseline justify-between gap-x-6 gap-y-2 border-b border-foreground pb-2">
         <p className="flex flex-wrap items-baseline gap-x-3">
-          <Link href={personPath(p.display_name)} className={cn("font-display text-[22px] leading-tight", LINK)}>{p.display_name}</Link>
+          <Link href={personPath(p.page_name ?? p.display_name)} className={cn("font-display text-[22px] leading-tight", LINK)}>{p.display_name}</Link>
           <a href={orcidUrl(p.orcid)} target="_blank" rel="noreferrer" className={cn("font-mono text-[12px]", MUTED_LINK)}>{p.orcid}</a>
           <span className="font-mono text-[11.5px] tabular text-muted-foreground">followed {day(p.followed_at)}</span>
         </p>

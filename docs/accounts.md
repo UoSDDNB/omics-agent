@@ -142,31 +142,52 @@ no analytics.
   "Thoreen CC"). The page shows the ORCID and a Follow button only when all of these hold: the name is not common (at
   most 300 papers, the page's own threshold for "belongs to several people"); the ORCID is tagged on at least 3 of
   those papers and on more than half of the papers that tag any ORCID there; and the ORCID record's own public name
-  agrees with the page's name (same surname, the same first name when both spell it out, compatible initials
-  otherwise). Otherwise the page says why: the name matches several people, no paper is tagged, too few are, the ORCID
-  record is someone else's, or ORCID did not answer in time ("could not confirm", rechecked after 5 minutes). Following
-  a guest opens the sign-in prompt, which brings you back. The name kept with a follow is the one on the ORCID record.
+  agrees with the page's name (see "Names that agree" below). Otherwise the page says why: the name matches several
+  people, no paper is tagged, too few are, the ORCID record is someone else's, or ORCID did not answer in time ("could
+  not confirm", rechecked after 20 seconds). When locus itself is too busy to ask ORCID, the page says locus is busy
+  and nothing is kept. Following a guest opens the sign-in prompt, which brings you back. The name kept with a follow
+  is the one on the ORCID record, together with the person page's name it was made from, which `/following` links to.
+- **Names that agree.** The surname must match (accents, case and hyphens aside). Then, by the form of the page's name:
+  - The page spells the first name ("Carson C Thoreen", "Carson Thoreen") and so does the record: the first names
+    must be equal, and a middle initial may be missing on either side. "Carson C Thoreen" agrees with "Carson
+    Thoreen"; "Yu Zhang" does not agree with "Yang Zhang".
+  - The page is in Europe PMC's form, surname then initials ("Thoreen CC", the form a paper page's author links use),
+    and the record spells the first name: the record's initials must be the page's or their start, so the record may
+    leave out middle initials but never add one. "Thoreen CC" agrees with "Carson Thoreen" and "Carson C Thoreen",
+    not with "Carson J Thoreen" or "Kevin Thoreen"; "Thoreen C" does not agree with "Carson C Thoreen".
+  - Otherwise (the record gives initials only): the initials must be equal, or one must extend the other when both
+    have at least two letters. "Thoreen CC" agrees with "C. C. Thoreen", not with "C. Thoreen".
+
+  The papers counted for an ORCID are stricter still: an author printed "Thoreen C" is never counted for the page
+  "Thoreen CC", so a different "Thoreen C" with many tagged papers cannot win that page. A common name ("Wang W",
+  48,000 papers) never gets Follow whatever the record says, and a split between two ORCIDs ("Zhang Y" with Yang's
+  and Yu's) gives "several people".
 - **What following brings.** `/following` lists, for each person, the locus datasets that their ORCID-linked papers
   deposited or cite (Europe PMC `AUTHORID:"<orcid>"`, newest 100 papers, newest paper first). The name search is never
   used, so another person's datasets cannot appear. Each dataset is marked new until you choose "Mark all as seen".
 - **Coverage.** Europe PMC links only part of a person's papers to their ORCID, more often the recent ones (29 Oct:
   5 of 42 papers for Carson Thoreen). The person page says how many of the papers it read carry the ORCID, and how
   many Europe PMC links to the ORCID in all, e.g. "Europe PMC ties 5 of the 42 papers under this name to this ORCID.
-  Following uses all 7 papers Europe PMC links to the ORCID". A dataset from an older paper without the link does not show.
+  Following uses the 7 papers Europe PMC links to this ORCID, never the name search." Past 100 linked papers it says
+  "the newest 100 of the 250 papers". A dataset from an older paper without the link does not show.
 - **Watched searches** are listed on `/following` too, each with its link and the day watching started. The page runs
   none of them (a search uses the model), so it shows no new-dataset count for them (DECISIONS D12); opening one runs
   it and marks what is new.
-- **Limits.** 200 follows an account. Each visit to `/following` reads the 40 most recent follows on one server-wide
+- **Limits.** 200 follows an account, and at most 30 new follows a minute (each reads the ORCID record once; the
+  200 check and a repeated follow read nothing). An ORCID iD that does not exist is refused, and that answer is kept 5
+  minutes. Each visit to `/following` reads the 40 most recent follows on one server-wide
   pool of 4 workers, within 45 seconds; a person not read in time says so. An account reads upstream at most once
   every 10 seconds (in between, the page shows what is cached), and accounts that follow the same ORCID share one
   fetch. Each ORCID's answer is kept for 6 hours (a failure for 5 minutes), so a dataset that arrives in Europe PMC or
   locus shows within that time; person pages keep theirs 6 hours too. Calls to Europe PMC are paced to at most 5 a
   second and to ORCID at most 2 a second across the whole server (`omics_agent/pace.py`), and no call waits more than
   2 seconds for its turn: past that, and when more than 8 person reads are under way at once, the answer is 503 with
-  Retry-After and the page says locus is busy. `/person` and `/person/identity` take at most 30 requests a minute
-  from one address and 240 overall. `LOCUS_EPMC_BASE` and `LOCUS_ORCID_BASE` point the upstream calls elsewhere (the
+  Retry-After and the page says locus is busy. At most 8 `/following` reads run at once across the server; one more
+  gets 503 at once. `/person` and `/person/identity` answers that need Europe PMC are limited to 30 a minute from
+  one address and 240 overall; an IPv6 address counts as its /64, an IPv4 address as itself, and answers locus
+  already holds are never counted. `LOCUS_EPMC_BASE` and `LOCUS_ORCID_BASE` point the upstream calls elsewhere (the
   page checks use fixtures).
-- **API:** `GET /person/identity?name=` (anyone); `GET /follows/people`, `POST /follows/people` `{orcid}`,
+- **API:** `GET /person/identity?name=` (anyone); `GET /follows/people`, `POST /follows/people` `{orcid, page_name}`,
   `DELETE /follows/people` `{orcid}`, `POST /follows/people/seen` `{orcid, accessions}`, `GET /follows/people/updates`.
   Changes need a session, JSON and `X-Locus-Intent: 1`. One account cannot read or change another's follows.
 

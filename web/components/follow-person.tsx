@@ -73,10 +73,10 @@ export function FollowPerson({ name }: { name: string }) {
         {id.reason === "no_record" && <>locus could not confirm whose ORCID this is: the ORCID record did not answer in time. It offers no Follow until it can. Reload the page to try again.</>}
       </p>
     );
-  return <OneOrcid id={id} />;
+  return <OneOrcid id={id} name={name} />;
 }
 
-function OneOrcid({ id }: { id: Identity }) {
+function OneOrcid({ id, name }: { id: Identity; name: string }) {
   const orcid = id.orcid!;
   const [who, setWho] = useState<Who>("loading");
   const [following, setFollowing] = useState(false);
@@ -114,7 +114,7 @@ function OneOrcid({ id }: { id: Identity }) {
     setProblem("");
     try {
       if (following) await unfollow(orcid);
-      else await follow(orcid);
+      else await follow(orcid, name);
       setFollowing(!following);
     } catch (e) {
       setProblem(describe(e));

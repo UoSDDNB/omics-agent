@@ -11,7 +11,8 @@ export type Identity = {
   orcid?: string; orcid_name?: string | null; claimed?: number; linked?: number;
 };
 
-export type Follow = { orcid: string; display_name: string; followed_at: string; seen: string[] };
+// page_name: the person page's name the follow was made from (null for older follows), so /following links back to it.
+export type Follow = { orcid: string; display_name: string; page_name: string | null; followed_at: string; seen: string[] };
 
 export type FollowedDataset = {
   accession: string; source: string; title: string; modality: string; new: boolean;
@@ -24,6 +25,8 @@ export type FollowedPerson = Follow & {
 };
 
 export const FOLLOW_LIMITS = { follows: 200, checked: 40 };
+// How many of an ORCID's linked papers following reads: the newest 100 (follows.PAGE in the API).
+export const ORCID_PAPERS_READ = 100;
 
 async function call<T>(method: "GET" | "POST" | "DELETE", path: string, body?: unknown): Promise<T> {
   const init: RequestInit = method === "GET"
@@ -41,7 +44,7 @@ async function call<T>(method: "GET" | "POST" | "DELETE", path: string, body?: u
 export const identity = (name: string) => call<Identity>("GET", `/person/identity?name=${encodeURIComponent(name)}`);
 export const listFollows = () => call<{ follows: Follow[] }>("GET", "/follows/people").then((r) => r.follows);
 export const followUpdates = () => call<{ people: FollowedPerson[] }>("GET", "/follows/people/updates").then((r) => r.people);
-export const follow = (orcid: string) => call<{ added: boolean }>("POST", "/follows/people", { orcid });
+export const follow = (orcid: string, pageName: string) => call<{ added: boolean }>("POST", "/follows/people", { orcid, page_name: pageName });
 export const unfollow = (orcid: string) => call<{ ok: boolean }>("DELETE", "/follows/people", { orcid });
 export const markSeen = (orcid: string, accessions: string[]) => call<{ seen: string[] }>("POST", "/follows/people/seen", { orcid, accessions });
 
@@ -56,6 +59,7 @@ export const nameWindow = (scanned: number, matched: number) =>
 // check read); the ORCID's own total is a separate count, and it is what following uses.
 export function coverage(id: Identity): string {
   const claimed = id.claimed ?? 0, linked = id.linked ?? 0;
+  const used = linked > ORCID_PAPERS_READ ? `the newest ${ORCID_PAPERS_READ} of the ${papers(linked)}` : `the ${papers(linked)}`;
   return `Europe PMC ties ${claimed.toLocaleString()} of ${nameWindow(id.scanned ?? 0, id.matched ?? 0)} to this ORCID. ` +
-    `Following uses ${linked === 1 ? "the 1 paper" : `all ${papers(linked)}`} Europe PMC links to the ORCID, so only papers tied to it are used.`;
+    `Following uses ${used} Europe PMC links to this ORCID, never the name search.`;
 }

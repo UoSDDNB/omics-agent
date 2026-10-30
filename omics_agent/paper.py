@@ -142,6 +142,8 @@ def _zip_sizes(pmcid: str) -> dict[str, int]:
     url = f"{EPMC}/{pmcid}/supplementaryFiles"
     try:
         return directory_sizes(lambda header: _range(url, header))
+    except pace.PaceTimeout:
+        raise  # locus was busy: not kept (lru_cache keeps no exception), the caller shows no sizes this time
     except (httpx.HTTPError, struct.error, UnicodeDecodeError):
         return {}
 
@@ -156,7 +158,10 @@ def _supplementary(xml: str, pmcid: str) -> dict:
             if not PEER_REVIEW.search(f"{name} {caption}"):
                 files[name] = {"name": name, "caption": caption, "bytes": int(size[1]) if size else None, "url": PMC_FILE.format(pmcid[3:], quote(name))}
     if any(f["bytes"] is None for f in files.values()):
-        sizes = _zip_sizes(pmcid)
+        try:
+            sizes = _zip_sizes(pmcid)
+        except pace.PaceTimeout:
+            sizes = {}
         for f in files.values():
             f["bytes"] = f["bytes"] or sizes.get(f["name"])
     return {"zip": f"{EPMC}/{pmcid}/supplementaryFiles", "files": list(files.values()), "note": None}
@@ -247,6 +252,8 @@ def paper(identifier: str, offset: int = 0) -> dict:
         try:
             xml = _full_text(pmcid)
             availability, supplementary = _availability(xml), _supplementary(xml, pmcid)
+        except pace.PaceTimeout:
+            raise  # locus was busy, which the route answers with 503; Europe PMC did send the full text
         except (httpx.HTTPError, ET.ParseError):
             availability, supplementary = {"status": "unavailable", "note": NOT_SENT}, {"zip": None, "files": [], "note": NOT_SENT}
     named = statement_accessions(availability["text"]) if availability["status"] == "stated" else []

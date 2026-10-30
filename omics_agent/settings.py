@@ -269,7 +269,7 @@ def export_data(conn, user_id: int) -> dict:
         "watched_searches": [dict(w) | {"seen": json.loads(w["seen"])} for w in many(
             "SELECT question, since, created_at, seen FROM watches WHERE user_id = ? ORDER BY id")],
         "followed_people": [dict(f) | {"seen": json.loads(f["seen"])} for f in many(
-            "SELECT orcid, display_name, followed_at, seen FROM follows WHERE user_id = ? ORDER BY id")],
+            "SELECT orcid, display_name, page_name, followed_at, seen FROM follows WHERE user_id = ? ORDER BY id")],
         "activity": many("SELECT at, event FROM audit WHERE user_id = ? ORDER BY id"),
     }
 

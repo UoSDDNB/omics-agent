@@ -70,10 +70,13 @@ def datasets_of(papers: list[dict]) -> dict[str, list[dict]]:
     return found
 
 
-def person(name: str) -> dict:
-    """The person page's answer, kept 6 hours per name. httpx errors (PaceTimeout among them) pass through."""
+def person(name: str, admit=None) -> dict:
+    """The person page's answer, kept 6 hours per name. httpx errors (PaceTimeout among them) pass through. `admit`,
+    when given, is called only on a cache miss, before any upstream work (a rate limit that cached answers skip)."""
     if (hit := PEOPLE.get(name)) is not None:
         return hit
+    if admit is not None:
+        admit()
     with pace.UPSTREAM:
         out = _person(name)
     PEOPLE.put(name, out)

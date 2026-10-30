@@ -369,6 +369,8 @@ def cite_paper(q: str = Query(min_length=6, max_length=300)) -> dict:
     """The paper a citation-like query names (surname, year and a title word) and its locus datasets; {} when none."""
     try:
         return paper.cite(q) or {}
+    except pace.PaceTimeout:
+        raise HTTPException(503, BUSY, headers={"Retry-After": str(pace.RETRY_AFTER)})
     except httpx.HTTPError:
         return {}
 
@@ -379,11 +381,12 @@ BUSY = "locus is reading Europe PMC for many people at once. Please try again in
 @app.get("/person")
 def person_page(request: Request, name: str = Query(min_length=3, max_length=120)) -> dict:
     """A contributor's papers in Europe PMC (author search by surname and initials), their journals, which papers have
-    supplementary files, and the locus datasets those papers deposited or cite. Rate-limited per caller and overall
-    (follows.PERSON_LIMIT); 503 with Retry-After when the Europe PMC pacing or the upstream cap is full."""
-    follows.PERSON_LIMIT.check(users.client_ip(request))
+    supplementary files, and the locus datasets those papers deposited or cite. Answers that need Europe PMC are
+    rate-limited per caller and overall (follows.PERSON_LIMIT); cached answers are not counted. 503 with Retry-After
+    when the Europe PMC pacing or the upstream cap is full."""
+    ip = users.client_ip(request)
     try:
-        return person.person(name)
+        return person.person(name, admit=lambda: follows.PERSON_LIMIT.check(ip))
     except pace.PaceTimeout:
         raise HTTPException(503, BUSY, headers={"Retry-After": str(pace.RETRY_AFTER)})
     except httpx.HTTPError:

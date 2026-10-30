@@ -57,7 +57,7 @@ export function PaperPage({ id }: { id: string }) {
         <p className="text-sm">Europe PMC has no paper {id}. <Link href={`/?q=${encodeURIComponent(id)}`} className={LINK}>Search instead</Link>.</p>
       ) : error ? (
         <p className="flex flex-wrap items-baseline gap-x-3 text-sm">
-          {error === "502" ? "Europe PMC did not answer." : "locus could not read this paper."}
+          {error === "502" ? "Europe PMC did not answer." : error === "503" ? "locus is reading Europe PMC for many people at once. Please try again in a few seconds." : "locus could not read this paper."}
           <button type="button" onClick={() => setAttempt((n) => n + 1)} className={LINK}>Try again</button>
         </p>
       ) : !rec ? (

@@ -344,6 +344,17 @@ def is_local(request: Request) -> bool:
 # ---------------------------------------------------------------- rate limits
 
 
+def limit_key(caller: str) -> str:
+    """The rate-limit key of a caller: an IPv4 address as is, an IPv6 address as its /64 network (an IPv4-mapped IPv6
+    address as its IPv4 address), anything else unchanged."""
+    ip = _ip(caller)
+    if isinstance(ip, ipaddress.IPv6Address):
+        if ip.ipv4_mapped is not None:
+            return str(ip.ipv4_mapped)
+        return str(ipaddress.IPv6Network(f"{ip}/64", strict=False))
+    return str(ip) if ip is not None else caller
+
+
 class RateLimiter:
     """In-process sliding one-minute windows: per caller address and overall, for one bucket of routes."""
 
@@ -363,9 +374,11 @@ class RateLimiter:
         return q
 
     def check(self, ip: str) -> None:
+        """Counts one attempt for a caller: an address (an IPv6 address counts as its /64, which one client usually
+        holds whole) or any other key ("account:7")."""
         t = time.monotonic()
         with self.lock:
-            mine, everyone = self._count("ip:" + ip, t), self._count("*", t)
+            mine, everyone = self._count("ip:" + limit_key(ip), t), self._count("*", t)
             if len(mine) >= self.per_ip or len(everyone) >= self.overall:
                 wait = int(self.window - (t - (mine[0] if len(mine) >= self.per_ip else everyone[0]))) + 1
                 raise ApiError(429, "RATE_LIMITED", f"Too many attempts. Please wait {wait} seconds and try again.", transient=True, headers={"Retry-After": str(wait)})
