@@ -12,7 +12,7 @@ from urllib.parse import quote
 
 import httpx
 
-from . import store
+from . import pace, store
 
 EPMC = "https://www.ebi.ac.uk/europepmc/webservices/rest"
 ARTICLE = "https://europepmc.org/article/{}/{}"
@@ -53,6 +53,7 @@ def _query(pid: str) -> str:
 @lru_cache(maxsize=256)
 def lookup(pid: str) -> dict | None:
     """Europe PMC's core record for a paper ID from paper_id(); the first match, or None."""
+    pace.EUROPE_PMC.wait()  # app-wide Europe PMC pacing (pace.py)
     found = httpx.get(f"{EPMC}/search", params={"query": _query(pid), "format": "json", "resultType": "core"}, timeout=30).json()["resultList"]["result"]
     return found[0] if found else None
 
@@ -64,6 +65,7 @@ def path(core: dict) -> str:
 
 @lru_cache(maxsize=64)
 def _full_text(pmcid: str) -> str:
+    pace.EUROPE_PMC.wait()
     response = httpx.get(f"{EPMC}/{pmcid}/fullTextXML", timeout=60)
     response.raise_for_status()
     return response.text
@@ -90,6 +92,7 @@ def _availability(xml: str) -> dict:
 def _range(url: str, header: str) -> tuple[bytes, int] | None:
     """The bytes of a Range request and the size of the whole file; None when the server answers anything but 206, so a
     server that ignores Range is never read to the end."""
+    pace.EUROPE_PMC.wait()
     with httpx.stream("GET", url, headers={"Range": header}, timeout=60) as response:
         if response.status_code != 206 or "/" not in response.headers.get("content-range", ""):
             return None
@@ -221,6 +224,7 @@ def cite(text: str) -> dict | None:
     if not words:
         return None
     query = f'AUTH:"{surname}" AND PUB_YEAR:{year} AND (' + " OR ".join(f'"{w}"' for w in words) + ")"
+    pace.EUROPE_PMC.wait()
     found = httpx.get(f"{EPMC}/search", params={"query": query, "format": "json", "resultType": "lite", "pageSize": 1}, timeout=30).json()["resultList"]["result"]
     if not found or not any(w.lower() in found[0].get("title", "").lower() for w in words):
         return None

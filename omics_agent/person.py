@@ -6,10 +6,7 @@ import re
 import unicodedata
 from functools import lru_cache
 
-import httpx
-
-from . import store
-from .paper import EPMC
+from . import pace, store
 
 PAGE = 100
 TITLES = re.compile(r"^(dr|prof|professor|mr|mrs|ms|sir)\.?$", re.I)
@@ -40,7 +37,7 @@ def _plain(text: str) -> str:
     return "".join(c for c in unicodedata.normalize("NFKD", text) if not unicodedata.combining(c)).lower()
 
 
-def _datasets(papers: list[dict]) -> dict[str, list[dict]]:
+def datasets_of(papers: list[dict]) -> dict[str, list[dict]]:
     """Locus datasets whose stored paper IDs include each paper's PMID or DOI, in one pass over the index."""
     keys = {f'"pmid:{p["pmid"]}"': p["key"] for p in papers if p.get("pmid")} | {f'"doi:{p["doi"].lower()}"': p["key"] for p in papers if p.get("doi")}
     if not keys:
@@ -61,8 +58,7 @@ def person(name: str) -> dict:
     query = author_query(name)
     if not query:
         return {"name": name, "available": False, "reason": "the name has no surname and given name to search by"}
-    body = httpx.get(f"{EPMC}/search", params={"query": f'AUTH:"{query}"', "format": "json", "resultType": "lite", "pageSize": PAGE, "sort": "P_PDATE_D desc"},
-                     timeout=30).raise_for_status().json()
+    body = pace.epmc_get("/search", {"query": f'AUTH:"{query}"', "format": "json", "resultType": "lite", "pageSize": PAGE, "sort": "P_PDATE_D desc"})
     papers = []
     for r in body["resultList"]["result"]:
         preprint = r.get("source") == "PPR" or "preprint" in (r.get("pubType") or "")
@@ -73,7 +69,7 @@ def person(name: str) -> dict:
             "supplementary": r.get("hasSuppl") == "Y", "accessions_in_text": r.get("hasTMAccessionNumbers") == "Y",
             "last_author": _plain(r.get("authorString", "")).rstrip(".").split(", ")[-1] == _plain(query),
         })
-    linked = _datasets(papers)
+    linked = datasets_of(papers)
     for p in papers:
         p["datasets"] = linked.get(p["key"], [])
     journals: dict[str, int] = {}

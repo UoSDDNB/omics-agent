@@ -20,7 +20,7 @@ an account does, what locus stores for it, and what is not built yet.
 
 Account data lives in its own SQLite file, `OMICS_USERS_DB` (default `data/users.db`, not in git), never in
 `omics.db`. For each account: the display name and creation time; each passkey's public key, counter, transports,
-creation and last-use times; hashed recovery codes; your lists and their items and your watched searches (see below); a linked ORCID iD; sessions (a hash of the cookie token, the
+creation and last-use times; hashed recovery codes; your lists and their items, your watched searches and the people you follow (their ORCID, name and the datasets you marked seen; see below); a linked ORCID iD; sessions (a hash of the cookie token, the
 sign-in method, times and the browser's user-agent string); and a short audit trail of sign-ins and changes. locus runs
 no analytics.
 
@@ -113,8 +113,32 @@ no analytics.
   with 422 and adds nothing. Both answer `added`, `already`, `left_out` and `held` (added plus already). Both need a
   session, JSON and `X-Locus-Intent: 1`, and each runs as one transaction that no other change interleaves with.
 
+## Following researchers
+
+- **By ORCID only.** A person page searches Europe PMC by surname and initials, which mixes people who share a name.
+  So the page also reads the author lists of the name's newest 100 papers and counts the ORCIDs Europe PMC tags on that
+  author. When one ORCID accounts for most of the tagged papers, the page shows it (with the name on the ORCID record)
+  and a Follow button. When several ORCIDs share the tagged papers, the page says the name matches several people; when
+  none is tagged, it says so. Neither offers Follow. Following a guest opens the sign-in prompt, which brings you back.
+- **What following brings.** `/following` lists, for each person, the locus datasets that their ORCID-linked papers
+  deposited or cite (Europe PMC `AUTHORID:"<orcid>"`, newest 100 papers, newest paper first). The name search is never
+  used, so another person's datasets cannot appear. Each dataset is marked new until you choose "Mark all as seen".
+- **Coverage.** Europe PMC links only part of a person's papers to their ORCID, more often the recent ones (29 Oct:
+  5 of 42 papers for Carson Thoreen). Both pages say how many, e.g. "Europe PMC links 5 of 42 papers under this name to
+  this ORCID; following uses those 5". A dataset from an older paper without the link does not show.
+- **Watched searches** are listed on `/following` too, each with its link and the day watching started. The page runs
+  none of them (a search uses the model); opening one runs it and marks what is new.
+- **Limits.** 200 follows an account. Each visit to `/following` reads the 40 most recent follows, 4 at a time, within
+  45 seconds; a person not read in time says so. Each ORCID's answer is kept for 6 hours, so a dataset that arrives in
+  Europe PMC or locus shows within that time. Calls to Europe PMC are paced to at most 5 a second and to ORCID at most
+  2 a second across the whole server (`omics_agent/pace.py`); `LOCUS_EPMC_BASE` and `LOCUS_ORCID_BASE` point them
+  elsewhere (the page checks use fixtures).
+- **API:** `GET /person/identity?name=` (anyone); `GET /follows/people`, `POST /follows/people` `{orcid, display_name}`,
+  `DELETE /follows/people` `{orcid}`, `POST /follows/people/seen` `{orcid, accessions}`, `GET /follows/people/updates`.
+  Changes need a session, JSON and `X-Locus-Intent: 1`. One account cannot read or change another's follows.
+
 ## Not built yet
 
-Public lists, following researchers, settings (renaming, adding or removing passkeys, new recovery codes, unlinking
+Public lists, settings (renaming, adding or removing passkeys, new recovery codes, unlinking
 ORCID, deleting the account) come in later steps. A list cannot be reordered by hand, and the nf-core sample sheet is not offered for a
-whole list yet. Email is not used.
+whole list yet. Email is not used, so following sends no digest; following institutions or topics, and a person without an ORCID, are not supported.

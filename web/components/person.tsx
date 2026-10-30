@@ -6,6 +6,7 @@ import { cn } from "@/lib/utils";
 import { Wordmark } from "@/components/logo";
 import { BackToResults } from "@/components/back-to-results";
 import { Heading, LINK, MUTED_LINK } from "@/components/page-kit";
+import { FollowPerson } from "@/components/follow-person";
 import { dataType } from "@/components/result-card";
 import { datasetPath, person, repositoryName, type Person, type PersonPaper } from "@/lib/api";
 
@@ -61,6 +62,7 @@ export function PersonPage({ name }: { name: string }) {
             {rec.matched! > COMMON_NAME && " A name this common belongs to several people, so these papers are not all theirs."}
           </p>
         )}
+        <FollowPerson name={name} />
       </header>
       {error ? (
         <p className="flex flex-wrap items-baseline gap-x-3 text-sm">
