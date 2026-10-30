@@ -146,7 +146,7 @@ export function Search() {
     const asked = new URLSearchParams(location.search).get("q")?.trim();
     const saved = sessionStorage.getItem(LAST);
     const last: Result | null = saved ? JSON.parse(saved) : null;
-    if (asked && asked !== last?.question) {
+    if (asked && asked !== last?.question?.trim()) {
       // eslint-disable-next-line react-hooks/set-state-in-effect
       setQ(asked);
       open(asked, true);
@@ -207,8 +207,10 @@ export function Search() {
     }
   }
 
-  async function run(question: string, animate = true) {
-    if (!question.trim()) return;
+  async function run(typed: string, animate = true) {
+    // One form of the question everywhere: the address, the search, the kept result and the watch key (watches.ts).
+    const question = typed.trim();
+    if (!question) return;
     setMiss(null);
     history.replaceState(null, "", `/?q=${encodeURIComponent(question.trim())}`);
     // A new search replaces the one in flight, so a stalled stream can never lock the page.

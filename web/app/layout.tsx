@@ -20,7 +20,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       <body className="min-h-full flex flex-col bg-background text-foreground font-sans">
         <MotionConfig reducedMotion="user">
           <AccountMenu />
-          <main className="flex-1 w-full px-5 pt-12 pb-24">
+          <main className="flex-1 w-full px-5 pt-12 pb-[calc(6rem+var(--dock,0px))]">
             <GuestImport />
             {children}
           </main>

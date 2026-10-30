@@ -76,6 +76,8 @@ export function GuestImport() {
   const [clearing, setClearing] = useState(false);
   const [said, setSaid] = useState("");
   const heading = useRef<HTMLHeadingElement>(null);
+  const panel = useRef<HTMLElement>(null);
+  const moved = useRef(false); // set when Clear or Keep them swaps the action rows, so focus follows the swap
 
   const check = useCallback(() => {
     // With nothing to offer there is no need to ask who is signed in.
@@ -88,6 +90,7 @@ export function GuestImport() {
         return;
       }
       setOffer({ user: user.id, ...h });
+      setSaid(`This browser has ${[h.saved > 0 && plural(h.saved, "saved dataset", "saved datasets"), h.watched > 0 && plural(h.watched, "watched search", "watched searches")].filter(Boolean).join(" and ")}. Add them to your account? The choice is at the bottom of the page.`);
       setDone(null);
       setError("");
       setClearing(false);
@@ -104,6 +107,34 @@ export function GuestImport() {
     if (done) heading.current?.focus({ preventScroll: true });
   }, [done]);
 
+  // The panel is fixed to the bottom edge. Its real height goes into --dock on <html>, so the page's bottom padding and
+  // the results' selection bar (Compare, copy) sit above it instead of under it.
+  const shown = !!(offer || done);
+  useEffect(() => {
+    const root = document.documentElement;
+    const el = panel.current;
+    if (!shown || !el) {
+      root.style.removeProperty("--dock");
+      return;
+    }
+    const measure = () => root.style.setProperty("--dock", `${Math.ceil(el.getBoundingClientRect().height)}px`);
+    measure();
+    const watcher = new ResizeObserver(measure);
+    watcher.observe(el);
+    return () => {
+      watcher.disconnect();
+      root.style.removeProperty("--dock");
+    };
+  }, [shown]);
+
+  // Clear asks to confirm in place: focus goes to the confirming button, and back to "Clear from this browser" after
+  // "Keep them", rather than dropping to the page.
+  useEffect(() => {
+    if (!moved.current) return;
+    moved.current = false;
+    panel.current?.querySelector<HTMLElement>(clearing ? "[data-clear-confirm]" : "[data-clear-local]")?.focus();
+  }, [clearing]);
+
   const remember = (user: number) => localStorage.setItem(DECLINED, JSON.stringify([...new Set([...declined(), user])]));
 
   const add = async () => {
@@ -117,6 +148,7 @@ export function GuestImport() {
       // Whatever did not fit or could not be read stays in this browser; say so once rather than ask on every page.
       const left = (result.saved ? result.saved.left_out.length + result.saved.skipped : 0) + (result.watched ? result.watched.left_out.length + result.watched.skipped : 0);
       if (left > 0) remember(offer.user);
+      setSaid([result.saved && savedSummary(result.saved), result.watched && watchSummary(result.watched)].filter(Boolean).join(" "));
       setDone(result);
       setOffer(null);
     } catch (e) {
@@ -150,13 +182,14 @@ export function GuestImport() {
     close("Cleared from this browser.");
   };
 
+  // One persistent live region (never remounted) carries every announcement: the offer, the result, the close.
   const live = <p className="sr-only" role="status" aria-live="polite">{said}</p>;
-  if (!offer && !done) return live;
 
   return (
     <>
       {live}
-      <section aria-labelledby="guest-import" data-guest-import={done ? "done" : "offer"}
+      {shown && (
+      <section ref={panel} aria-labelledby="guest-import" data-guest-import={done ? "done" : "offer"}
         className="fixed inset-x-0 bottom-0 z-40 border-t border-rule bg-background/95 px-5 py-3 text-[13px] backdrop-blur-sm sm:py-4 sm:text-[14px]">
         <div className="mx-auto grid w-full max-w-4xl gap-2">
           <h2 id="guest-import" ref={heading} tabIndex={-1} className="font-display text-[18px] leading-tight outline-none sm:text-[22px]">
@@ -164,7 +197,7 @@ export function GuestImport() {
           </h2>
           {done ? (
             <>
-              <p className="text-muted-foreground" role="status" data-import-result>
+              <p className="text-muted-foreground" data-import-result>
                 {[done.saved && savedSummary(done.saved), done.watched && watchSummary(done.watched)].filter(Boolean).join(" ")}
               </p>
               {error && <p role="alert" className="text-destructive">{error} The watched searches stayed in this browser.</p>}
@@ -188,20 +221,21 @@ export function GuestImport() {
               {clearing ? (
                 <p className="flex flex-wrap items-center gap-x-3 gap-y-2">
                   <span>Remove these from this browser? Your account keeps what it has.</span>
-                  <Button type="button" size="sm" variant="outline" onClick={clear}>Clear</Button>
-                  <button type="button" className={LINK} onClick={() => setClearing(false)}>Keep them</button>
+                  <Button data-clear-confirm type="button" size="sm" variant="outline" onClick={clear}>Clear</Button>
+                  <button type="button" className={LINK} onClick={() => { moved.current = true; setClearing(false); }}>Keep them</button>
                 </p>
               ) : (
                 <p className="flex flex-wrap items-center gap-x-3 gap-y-2">
                   <Button type="button" size="sm" disabled={busy} onClick={add}>{busy ? "Adding…" : "Add"}</Button>
                   <Button type="button" size="sm" variant="outline" disabled={busy} onClick={notNow}>Not now</Button>
-                  <button type="button" disabled={busy} className={`${LINK} text-muted-foreground`} onClick={() => setClearing(true)}>Clear from this browser</button>
+                  <button type="button" disabled={busy} className={`${LINK} text-muted-foreground`} onClick={() => { moved.current = true; setClearing(true); }} data-clear-local>Clear from this browser</button>
                 </p>
               )}
             </>
           )}
         </div>
       </section>
+      )}
     </>
   );
 }

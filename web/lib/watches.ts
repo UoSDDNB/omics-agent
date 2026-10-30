@@ -12,6 +12,12 @@ export type WatchImportResult = { added: string[]; already: string[]; left_out: 
 
 export const WATCH_LIMITS = { watches: 200, question: 500, seen: 500 };
 
+// The key a watch is kept under: the question trimmed, as the API keeps it (watches.py _question). Every lookup and
+// every write uses it, so "polysome profiling " typed with a trailing space finds the same watch.
+export const watchKey = (question: string) => question.trim();
+export const findWatch = (all: Watch[], question: string) => all.find((w) => watchKey(w.question) === watchKey(question)) ?? null;
+export const TOO_LONG = `Questions over ${WATCH_LIMITS.question} characters cannot be watched.`;
+
 // ---------------------------------------------------------------- this browser (guests)
 
 export const WATCHED = "locus:watched";
@@ -50,6 +56,8 @@ async function call<T>(method: "GET" | "POST" | "DELETE", path: string, body?: u
 
 // ---------------------------------------------------------------- the shared store
 
+// "guest" also covers a browser whose session check failed: its own watches still show and Watch still works there,
+// and the next mount asks again. "failed" means only that a signed-in account's watches could not be read.
 export type Watches = { status: "loading" | "guest" | "signed-in" | "failed"; watches: Watch[] };
 
 const INITIAL: Watches = { status: "loading", watches: [] };
@@ -68,7 +76,15 @@ export function reloadWatches(): Promise<void> {
   stale = false;
   inflight = (async () => {
     try {
-      const who = await me();
+      let who;
+      try {
+        who = await me();
+      } catch {
+        // Who is signed in is unknown: keep serving this browser's watches and ask again on the next mount.
+        set({ status: "guest", watches: guestWatches() });
+        stale = true;
+        return;
+      }
       if (!who.user) {
         set({ status: "guest", watches: guestWatches() });
         return;
@@ -77,6 +93,7 @@ export function reloadWatches(): Promise<void> {
       set({ status: "signed-in", watches: all.watches.map(({ question, since, seen }) => ({ question, since, seen })) });
     } catch {
       set({ status: "failed", watches: [] });
+      stale = true;
     } finally {
       inflight = null;
     }
@@ -116,7 +133,9 @@ async function ready(): Promise<Watches> {
 }
 
 // Starts watching a question (accessions: what the search shows now), or stops when accessions is null.
-export async function setWatch(question: string, accessions: string[] | null): Promise<void> {
+export async function setWatch(raw: string, accessions: string[] | null): Promise<void> {
+  const question = watchKey(raw);
+  if (accessions && question.length > WATCH_LIMITS.question) throw new AccountError("TOO_LONG", TOO_LONG, false);
   const s = await ready();
   if (s.status === "signed-in") {
     if (accessions) await call("POST", "", { question, seen: accessions.slice(-WATCH_LIMITS.seen) });
@@ -125,16 +144,17 @@ export async function setWatch(question: string, accessions: string[] | null): P
     return;
   }
   if (s.status !== "guest") throw new AccountError("UNAVAILABLE", "locus could not reach your watched searches. Please try again.", true);
-  const rest = guestWatches().filter((w) => w.question !== question);
+  const rest = guestWatches().filter((w) => watchKey(w.question) !== question);
   writeGuest(accessions ? [{ question, since: today(), seen: accessions.slice(-WATCH_LIMITS.seen) }, ...rest] : rest);
   set({ status: "guest", watches: guestWatches() });
 }
 
 // A new run of a search: if it is watched, tells `show` which results are new since the last run (before anything
 // changes, so the page marks them without a flicker), then records them as seen for the next run.
-export async function markSeen(question: string, accessions: string[], show: (n: { since: string; fresh: string[] }) => void): Promise<void> {
+export async function markSeen(raw: string, accessions: string[], show: (n: { since: string; fresh: string[] }) => void): Promise<void> {
+  const question = watchKey(raw);
   const s = await ready();
-  const watch = s.watches.find((w) => w.question === question);
+  const watch = findWatch(s.watches, question);
   if (!watch) return;
   const fresh = accessions.filter((a) => !watch.seen.includes(a));
   if (fresh.length === 0) return;
@@ -144,7 +164,7 @@ export async function markSeen(question: string, accessions: string[], show: (n:
       await call("POST", "", { question, seen: accessions.slice(-WATCH_LIMITS.seen) });
       await reloadWatches();
     } else {
-      writeGuest(guestWatches().map((w) => (w.question === question ? { ...w, seen: mergeSeen(w.seen, accessions) } : w)));
+      writeGuest(guestWatches().map((w) => (watchKey(w.question) === question ? { ...w, seen: mergeSeen(w.seen, accessions) } : w)));
       set({ status: "guest", watches: guestWatches() });
     }
   } catch {
@@ -156,7 +176,7 @@ export async function markSeen(question: string, accessions: string[], show: (n:
 
 // Only what the API accepts: a question of at most 500 characters, a real past day, accessions it can keep.
 function importable(w: Watch): Watch | null {
-  const question = w.question.trim();
+  const question = watchKey(w.question);
   if (!question || question.length > WATCH_LIMITS.question) return null;
   const real = typeof w.since === "string" && /^\d{4}-\d{2}-\d{2}$/.test(w.since) && !Number.isNaN(Date.parse(w.since)) && new Date(w.since).toISOString().slice(0, 10) === w.since;
   const day = real && w.since <= today() ? w.since : today();
@@ -171,7 +191,7 @@ export async function importGuestWatches(): Promise<WatchImportResult> {
   const batch = local.map(importable).filter((w): w is Watch => w !== null).slice(0, WATCH_LIMITS.watches);
   const done = await call<Omit<WatchImportResult, "skipped">>("POST", "/import", { watches: batch });
   const held = new Set(done.held);
-  writeGuest(guestWatches().filter((w) => !held.has(w.question.trim())));
+  writeGuest(guestWatches().filter((w) => !held.has(watchKey(w.question))));
   stale = true;
   await reloadWatches();
   return { ...done, skipped: local.length - batch.length };
