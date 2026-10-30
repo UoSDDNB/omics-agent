@@ -5,16 +5,17 @@ import { AuthPrompt } from "@/components/auth-prompt";
 import { LINK, MUTED_LINK } from "@/components/page-kit";
 import { Button } from "@/components/ui/button";
 import { ACCOUNT_EVENT, describe, me } from "@/lib/account";
-import { coverage, follow, identity, listFollows, orcidUrl, papers, unfollow, type Identity } from "@/lib/follows";
+import { coverage, follow, identity, listFollows, nameWindow, orcidUrl, papers, unfollow, type Identity } from "@/lib/follows";
 import { cn } from "@/lib/utils";
 
 type Who = "loading" | "guest" | "signed-in" | "failed";
 
-// Who a person page's name is, by ORCID, with Follow when Europe PMC ties the name to one ORCID. A name that several
-// ORCIDs share, or one whose papers carry no ORCID, gets a plain explanation and no Follow (papertok's unverified guard).
+// Who a person page's name is, by ORCID, with Follow only when the API says "one": Europe PMC ties most of the name's
+// tagged papers (at least 3) to one ORCID, the name is not common, and the ORCID record's own name agrees with the
+// page's. Every other answer gets a plain explanation and no Follow (papertok's unverified guard).
 export function FollowPerson({ name }: { name: string }) {
   const [id, setId] = useState<Identity | null>(null);
-  const [error, setError] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const [attempt, setAttempt] = useState(0);
 
   useEffect(() => {
@@ -23,10 +24,10 @@ export function FollowPerson({ name }: { name: string }) {
       (r) => {
         if (!live) return;
         setId(r);
-        setError(false);
+        setError(null);
       },
-      () => {
-        if (live) setError(true);
+      (e) => {
+        if (live) setError(e?.code === "BUSY" || e?.code === "RATE_LIMITED" ? e.message : "locus could not check which ORCID Europe PMC ties to this name.");
       },
     );
     return () => {
@@ -37,30 +38,45 @@ export function FollowPerson({ name }: { name: string }) {
   if (error)
     return (
       <p className="flex flex-wrap items-baseline gap-x-3 text-[13px] text-muted-foreground" data-follow-panel="error">
-        locus could not check which ORCID Europe PMC ties to this name.
+        {error}
         <button type="button" onClick={() => setAttempt((n) => n + 1)} className={LINK}>Try again</button>
       </p>
     );
   if (!id) return <p className="text-[13px] text-muted-foreground" data-follow-panel="loading">Checking which ORCID Europe PMC ties to this name…</p>;
   if (id.status === "no_name") return null;
+  if (id.status === "several" && id.reason === "common")
+    return (
+      <p className="max-w-[80ch] text-[13px] text-muted-foreground" data-follow-panel="several" data-reason="common">
+        This name matches several people: Europe PMC finds {papers(id.matched!)} under it. locus follows people by ORCID only, and with a name
+        this common it cannot tell whose ORCID is whose, so it offers no Follow here.
+      </p>
+    );
   if (id.status === "several")
     return (
-      <p className="max-w-[80ch] text-[13px] text-muted-foreground" data-follow-panel="several">
-        This name matches several people. Europe PMC tags {id.tagged} of the newest {papers(id.scanned!)} under it with {id.orcids} different ORCIDs,
-        and none of them accounts for most. locus follows people by ORCID only, so it offers no Follow here.
+      <p className="max-w-[80ch] text-[13px] text-muted-foreground" data-follow-panel="several" data-reason="shared">
+        This name matches several people. Of {nameWindow(id.scanned!, id.matched!)}, Europe PMC tags {papers(id.tagged!)} with {id.orcids} different
+        ORCIDs, and none of them accounts for most. locus follows people by ORCID only, so it offers no Follow here.
       </p>
     );
   if (id.status === "none")
     return (
       <p className="max-w-[80ch] text-[13px] text-muted-foreground" data-follow-panel="none">
-        None of the newest {papers(id.scanned!)} under this name tags this author with an ORCID in Europe PMC, so locus cannot tell whose papers
+        None of {nameWindow(id.scanned!, id.matched!)} tags this author with an ORCID in Europe PMC, so locus cannot tell whose papers
         they are and offers no Follow.
       </p>
     );
-  return <OneOrcid id={id} name={name} />;
+  if (id.status === "unconfirmed")
+    return (
+      <p className="max-w-[80ch] text-[13px] text-muted-foreground" data-follow-panel="unconfirmed" data-reason={id.reason}>
+        {id.reason === "few" && <>Europe PMC ties only {papers(id.claimed!)} of {nameWindow(id.scanned!, id.matched!)} to one ORCID. That is too few to say whose name this is, so locus offers no Follow.</>}
+        {id.reason === "other_name" && <>The ORCID Europe PMC tags most often under this name, <a href={orcidUrl(id.orcid!)} target="_blank" rel="noreferrer" className={LINK}>{id.orcid}</a>, belongs to {id.orcid_name ?? "someone with no public name"}, whose name does not match this page. locus offers no Follow.</>}
+        {id.reason === "no_record" && <>locus could not confirm whose ORCID this is: the ORCID record did not answer in time. It offers no Follow until it can. Reload the page to try again.</>}
+      </p>
+    );
+  return <OneOrcid id={id} />;
 }
 
-function OneOrcid({ id, name }: { id: Identity; name: string }) {
+function OneOrcid({ id }: { id: Identity }) {
   const orcid = id.orcid!;
   const [who, setWho] = useState<Who>("loading");
   const [following, setFollowing] = useState(false);
@@ -98,7 +114,7 @@ function OneOrcid({ id, name }: { id: Identity; name: string }) {
     setProblem("");
     try {
       if (following) await unfollow(orcid);
-      else await follow(orcid, id.orcid_name || name);
+      else await follow(orcid);
       setFollowing(!following);
     } catch (e) {
       setProblem(describe(e));
@@ -121,7 +137,7 @@ function OneOrcid({ id, name }: { id: Identity; name: string }) {
         </Button>
         {following && <Link href="/following" className={MUTED_LINK}>See what they bring</Link>}
       </p>
-      <p className="text-[12.5px] text-muted-foreground" data-coverage>{coverage(id.linked ?? 0, id.matched)}</p>
+      <p className="text-[12.5px] text-muted-foreground" data-coverage>{coverage(id)}</p>
       {who === "failed" && <p role="alert" className="text-[12.5px] text-destructive">locus could not check whether you are signed in. Reload the page to try again.</p>}
       {problem && <p role="alert" className="text-[12.5px] text-destructive">{problem}</p>}
       {asked && who === "guest" && (

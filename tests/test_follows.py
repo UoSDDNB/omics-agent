@@ -4,6 +4,7 @@ account can neither see nor change another's follows. Every Europe PMC and ORCID
 
 import threading
 import time
+from concurrent.futures import wait
 
 import httpx
 import pytest
@@ -50,6 +51,8 @@ class Upstream:
         self.fail: set[str] = set()
         self.delay = 0.0
         self.active = self.peak = 0
+        self.names: dict[str, tuple[str, str]] = {}
+        self.extra: dict[str, tuple[list, int]] = {}
 
     def get(self, url, params=None, headers=None, timeout=None):
         with self.lock:
@@ -67,7 +70,10 @@ class Upstream:
     def _answer(self, url, params):
         request = httpx.Request("GET", url)
         if "/orcid/" in url:
-            body = {"name": {"given-names": {"value": "Carson"}, "family-name": {"value": "Thoreen"}, "credit-name": None}}
+            if "orcid" in self.fail:
+                return httpx.Response(503, json={}, request=request)
+            given, family = self.names.get(url.split("/orcid/")[1].split("/")[0], ("Carson", "Thoreen"))
+            body = {"name": {"given-names": {"value": given}, "family-name": {"value": family}, "credit-name": None}}
             return httpx.Response(200, json=body, request=request)
         query = params["query"]
         if any(f in query for f in self.fail):
@@ -77,6 +83,7 @@ class Upstream:
             f'AUTHORID:"{THOREEN}"': (THOREEN_ORCID, 5),
             'AUTH:"Smith J"': (SMITH_NAME, 900),
             'AUTH:"Nobody X"': (NOBODY_NAME, 1),
+            **self.extra,
         }.get(query, ([], 0))
         if query.startswith("AUTHORID:") and not found:
             orcid = query.split('"')[1]
@@ -106,8 +113,11 @@ def up(tmp_path, monkeypatch):
     monkeypatch.setattr(pace, "EUROPE_PMC", pace.Pace(10_000))
     monkeypatch.setattr(pace, "ORCID", pace.Pace(10_000))
     follows.clear_caches()
+    follows.INFLIGHT.clear()
     users.AUTH_LIMIT.reset()
     yield fake
+    # Fetches still running past a test's deadline would fill the next test's cache: let them land first.
+    wait(list(follows.INFLIGHT.values()), timeout=5)
     follows.clear_caches()
 
 
@@ -139,15 +149,16 @@ def test_one_orcid_for_most_tagged_papers_is_named_with_its_coverage(up):
     assert r.status_code == 200
     got = r.json()
     assert got["status"] == "one" and got["orcid"] == THOREEN
-    assert got["matched"] == 42 and got["linked"] == 5 and got["claimed"] == 5 and got["tagged"] == 5
+    assert got["matched"] == 42 and got["linked"] == 5 and got["claimed"] == 5 and got["tagged"] == 5 and got["scanned"] == 6
     assert got["orcid_name"] == "Carson Thoreen"
     # The co-author's ORCID on the same papers (Watson) is not counted: there is none, and Thoreen's alone is.
     assert got["orcids"] == 1
 
 
 def test_two_people_sharing_a_name_get_no_orcid(up):
+    up.extra['AUTH:"Smith J"'] = (SMITH_NAME, 6)
     got = TestClient(make_app(), client=LOCAL).get("/person/identity", params={"name": "John Smith"}).json()
-    assert got["status"] == "several" and "orcid" not in got
+    assert got["status"] == "several" and got["reason"] == "shared" and "orcid" not in got
     assert got["orcids"] == 2 and got["tagged"] == 6
 
 
@@ -165,6 +176,126 @@ def test_identity_is_cached_and_reports_upstream_failure(up):
     up.fail.add("Smith")
     r = c.get("/person/identity", params={"name": "John Smith"})
     assert r.status_code == 502 and r.json()["error"]["code"] == "UPSTREAM_FAILED"
+
+
+# The reviewer's fixtures (F5-r1-1): names where the old guard named someone else's ORCID.
+YANG, YU = SMITH_A, SMITH_B
+
+
+def identity_of(up, name, query, results, hits, names=None):
+    up.extra[f'AUTH:"{query}"'] = (results, hits)
+    up.names.update(names or {})
+    follows.clear_caches()
+    return TestClient(make_app(), client=LOCAL).get("/person/identity", params={"name": name}).json()
+
+
+def test_a_different_first_name_on_the_orcid_record_gets_no_follow(up):
+    # 'Yu Zhang' searches 'Zhang Y'; Yang Zhang's ORCID tags 3 papers, Yu Zhang's 2, the rest none.
+    results = ([paper(f"5{i}", "2024", [author("Zhang", "Y", YANG)]) for i in range(3)] + [paper(f"6{i}", "2023", [author("Zhang", "Y", YU)]) for i in range(2)]
+               + [paper(f"7{i:02d}", "2022", [author("Zhang", "Y")]) for i in range(95)])
+    got = identity_of(up, "Yu Zhang", "Zhang Y", results, 120, {YANG: ("Yang", "Zhang"), YU: ("Yu", "Zhang")})
+    assert got["status"] != "one" and got["orcid"] == YANG
+    assert got["status"] == "unconfirmed" and got["reason"] == "other_name" and got["orcid_name"] == "Yang Zhang"
+    # Even with a majority of 3 of 5 tagged papers, the same fixture under a common name's hit count is "several".
+    got = identity_of(up, "Yu Zhang", "Zhang Y", results, 48000)
+    assert got["status"] == "several" and got["reason"] == "common"
+
+
+def test_a_common_name_never_gets_follow(up):
+    # 'Wei Wang': 48,000 hits, one tagged paper of the 100 scanned, and the ORCID record even agrees.
+    results = [paper("801", "2024", [author("Wang", "W", YANG)])] + [paper(f"9{i:02d}", "2023", [author("Wang", "W")]) for i in range(99)]
+    got = identity_of(up, "Wei Wang", "Wang W", results, 48000, {YANG: ("Wei", "Wang")})
+    assert got["status"] == "several" and got["reason"] == "common" and "orcid" not in got
+    assert got["matched"] == 48000 and got["tagged"] == 1
+    # Not common, but one tagged paper is too little to say whose name this is.
+    got = identity_of(up, "Wei Wang", "Wang W", results, 100)
+    assert got["status"] == "unconfirmed" and got["reason"] == "few" and got["claimed"] == 1
+
+
+def test_a_single_initial_does_not_stand_in_for_two(up):
+    # Page 'Carson C Thoreen' (CC): a 'Thoreen C' with another ORCID tags 3 papers, Carson's (CC) tags 2.
+    results = [paper(f"11{i}", "2024", [author("Thoreen", "C", YANG)]) for i in range(3)] + [paper(f"12{i}", "2023", [author("Thoreen", "CC", YU)]) for i in range(2)]
+    got = identity_of(up, "Carson C Thoreen", "Thoreen CC", results, 42, {YANG: ("Chris", "Thoreen"), YU: ("Carson", "Thoreen")})
+    assert got["status"] != "one"
+    assert got.get("orcid") == YU and got["tagged"] == 2 and got["status"] == "unconfirmed" and got["reason"] == "few"
+
+
+def test_names_agree():
+    agree = follows.names_agree
+    assert agree("Carson C Thoreen", "Carson", "Thoreen")  # the record leaves out the middle initial
+    assert agree("Carson C Thoreen", "Carson C.", "Thoreen") and agree("Thoreen, Carson C.", "Carson", "thoreen")
+    assert agree("José García", "Jose", "Garcia")  # accents and case aside
+    assert not agree("Yu Zhang", "Yang", "Zhang")
+    assert not agree("Carson C Thoreen", "Carson", "Thorne")
+    assert agree("Thoreen CC", "C. C.", "Thoreen") and not agree("Thoreen CC", "C.", "Thoreen")  # "C" is not "CC"
+    assert agree("Thoreen CC", "C. C. T.", "Thoreen")
+    assert not agree("Carson C Thoreen", None, "Thoreen")
+    assert follows.initials_agree("CC", "CCT") and not follows.initials_agree("C", "CC") and not follows.initials_agree("JS", "JP")
+
+
+def test_an_unreadable_orcid_record_means_no_follow_and_is_kept_briefly(up, monkeypatch):
+    up.fail.add("orcid")
+    c = TestClient(make_app(), client=LOCAL)
+    got = c.get("/person/identity", params={"name": "Carson C Thoreen"}).json()
+    assert got["status"] == "unconfirmed" and got["reason"] == "no_record" and got["orcid"] == THOREEN
+    up.fail.clear()
+    n = len(up.calls)
+    assert c.get("/person/identity", params={"name": "Carson C Thoreen"}).json()["status"] == "unconfirmed"
+    assert len(up.calls) == n  # kept, but only for FAIL_SECONDS
+    t = time.monotonic()
+    monkeypatch.setattr(pace.time, "monotonic", lambda: t + follows.FAIL_SECONDS + 1)
+    assert c.get("/person/identity", params={"name": "Carson C Thoreen"}).json()["status"] == "one"
+
+
+# ---------------------------------------------------------------- bounded waits and limits
+
+
+def test_a_flood_of_identity_calls_is_refused_not_queued(up):
+    c = TestClient(make_app(), client=LOCAL)
+    codes = [c.get("/person/identity", params={"name": f"Ann Person{i:03d}"}).status_code for i in range(follows.IDENTITY_LIMIT.per_ip + 5)]
+    assert codes[: follows.IDENTITY_LIMIT.per_ip] == [200] * follows.IDENTITY_LIMIT.per_ip
+    assert set(codes[follows.IDENTITY_LIMIT.per_ip:]) == {429}
+    r = c.get("/person/identity", params={"name": "Ann Other"})
+    assert r.status_code == 429 and r.json()["error"]["code"] == "RATE_LIMITED" and int(r.headers["Retry-After"]) > 0
+
+
+def test_a_full_europe_pmc_queue_fails_fast_with_503(up, monkeypatch):
+    clock = FakeClock()
+    monkeypatch.setattr(pace, "EUROPE_PMC", pace.Pace(5, clock=clock, sleep=clock.sleep))
+    pace.EUROPE_PMC.next = clock.t + 30  # 30 s of backlog
+    c = TestClient(make_app(), client=LOCAL)
+    start = time.monotonic()
+    r = c.get("/person/identity", params={"name": "Carson C Thoreen"})
+    assert r.status_code == 503 and r.json()["error"]["code"] == "BUSY" and r.headers["Retry-After"]
+    assert time.monotonic() - start < 1 and clock.slept == [] and up.calls == []
+
+
+def test_too_many_reads_at_once_are_refused(up, monkeypatch):
+    monkeypatch.setattr(pace, "UPSTREAM", pace.Gate(1))
+    with pace.UPSTREAM:
+        r = TestClient(make_app(), client=LOCAL).get("/person/identity", params={"name": "Carson C Thoreen"})
+    assert r.status_code == 503 and up.calls == []
+
+
+def test_person_page_route_is_limited_and_cached(up, monkeypatch):
+    from omics_agent import api
+
+    c = TestClient(api.app, client=LOCAL)
+    monkeypatch.setattr(follows.PERSON_LIMIT, "per_ip", 3)
+    assert c.get("/person", params={"name": "Carson C Thoreen"}).json()["matched"] == 42
+    n = len(up.calls)
+    assert c.get("/person", params={"name": "Carson C Thoreen"}).status_code == 200 and len(up.calls) == n  # kept
+    assert c.get("/person", params={"name": "Carson C Thoreen"}).status_code == 200
+    assert c.get("/person", params={"name": "Carson C Thoreen"}).status_code == 429
+    follows.clear_caches()
+    pace.EUROPE_PMC.next = time.monotonic() + 30
+    r = c.get("/person", params={"name": "Carson C Thoreen"})
+    assert r.status_code == 503 and r.headers["Retry-After"]
+    pace.EUROPE_PMC.reset()
+    up.fail.add("Thoreen")
+    assert c.get("/person", params={"name": "Carson C Thoreen"}).status_code == 502
+    up.fail.clear()
+    assert c.get("/person", params={"name": "Carson C Thoreen"}).status_code == 200  # the failure was not kept
 
 
 # ---------------------------------------------------------------- follow, unfollow, seen
@@ -200,7 +331,6 @@ def test_follow_validates_orcid_and_name_and_needs_session_and_intent(up):
     r = c.post("/follows/people", json={"orcid": THOREEN, "display_name": "x"})
     assert r.status_code == 403 and r.json()["error"]["code"] == "INTENT_REQUIRED"
     assert call(c, "POST", "/follows/people", {"orcid": "0000-0003-1164-7225", "display_name": "x"}).status_code == 422  # bad check digit
-    assert call(c, "POST", "/follows/people", {"orcid": THOREEN, "display_name": "   "}).status_code == 422
     assert call(c, "POST", "/follows/people/seen", {"orcid": THOREEN, "accessions": ["not an accession"]}).status_code == 422
 
 
@@ -213,6 +343,17 @@ def test_one_account_cannot_see_or_change_anothers_follows(up):
     assert call(bob, "POST", "/follows/people/seen", {"orcid": THOREEN, "accessions": ["GSE900101"]}).status_code == 404
     mine = alice.get("/follows/people").json()["follows"]
     assert [f["orcid"] for f in mine] == [THOREEN] and mine[0]["seen"] == []
+
+
+def test_follow_keeps_the_orcid_records_name_not_the_clients(up):
+    c = signed_in()
+    up.names[SMITH_A] = ("Jane", "Smith")
+    assert call(c, "POST", "/follows/people", {"orcid": SMITH_A, "display_name": "Carson Thoreen"}).json()["display_name"] == "Jane Smith"
+    assert c.get("/follows/people").json()["follows"][0]["display_name"] == "Jane Smith"
+    up.fail.add("orcid")
+    r = call(c, "POST", "/follows/people", {"orcid": SMITH_B})
+    assert r.status_code == 503 and r.json()["error"]["transient"] is True
+    assert len(c.get("/follows/people").json()["follows"]) == 1
 
 
 def test_follow_limit(up, monkeypatch):
@@ -259,6 +400,12 @@ def test_updates_stop_at_the_deadline_and_report_failures(up, monkeypatch):
     up.fail.add(SMITH_A)
     got = {p["orcid"]: p["status"] for p in c.get("/follows/people/updates").json()["people"]}
     assert got == {SMITH_A: "failed", SMITH_B: "ok"}
+    # The failure is kept 5 minutes: the next fetch does not ask Europe PMC about SMITH_A again.
+    follows.LAST_UPDATES.clear()
+    up.fail.clear()
+    n = len(up.calls)
+    got = {p["orcid"]: p["status"] for p in c.get("/follows/people/updates").json()["people"]}
+    assert got == {SMITH_A: "failed", SMITH_B: "ok"} and len(up.calls) == n
 
     follows.clear_caches()
     up.fail.clear()
@@ -268,6 +415,38 @@ def test_updates_stop_at_the_deadline_and_report_failures(up, monkeypatch):
     got = {p["orcid"]: p["status"] for p in c.get("/follows/people/updates").json()["people"]}
     assert time.monotonic() - start < 0.45
     assert set(got.values()) == {"late"}
+
+
+def test_updates_are_throttled_per_account_and_share_one_fetch_per_orcid(up):
+    alice, bob = signed_in("Alice"), signed_in("Bob")
+    for c in (alice, bob):
+        assert call(c, "POST", "/follows/people", {"orcid": THOREEN}).status_code == 201
+    up.delay = 0.3
+    out: dict[str, list] = {}
+    threads = [threading.Thread(target=lambda c=c, k=k: out.setdefault(k, c.get("/follows/people/updates").json()["people"])) for k, c in (("a", alice), ("b", bob))]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert out["a"][0]["status"] == out["b"][0]["status"] == "ok"
+    assert sum("AUTHORID" in x for x in up.calls) == 1  # one fetch for both accounts
+    # A second call within UPDATES_EVERY answers from the cache only; a follow not yet read says "wait".
+    up.calls.clear()
+    assert call(alice, "POST", "/follows/people", {"orcid": SMITH_A}).status_code == 201
+    got = {p["orcid"]: p["status"] for p in alice.get("/follows/people/updates").json()["people"]}
+    assert got == {THOREEN: "ok", SMITH_A: "wait"} and not any("AUTHORID" in x for x in up.calls)
+
+
+def test_updates_use_one_shared_pool(up):
+    c = signed_in()
+    call(c, "POST", "/follows/people", {"orcid": THOREEN})
+    before = threading.active_count()
+    for _ in range(3):
+        follows.LAST_UPDATES.clear()
+        follows.WORK.clear()
+        c.get("/follows/people/updates")
+    assert threading.active_count() <= before + follows.FETCH_WORKERS
+    assert follows.POOL._max_workers == follows.FETCH_WORKERS
 
 
 # ---------------------------------------------------------------- pacing
@@ -308,6 +487,17 @@ def test_pace_refuses_a_slot_after_the_deadline():
     assert clock.slept == [0.5]
 
 
+def test_pace_never_queues_past_max_wait():
+    clock = FakeClock()
+    p = pace.Pace(5, clock=clock, sleep=clock.sleep)
+    p.next = clock.t + pace.MAX_WAIT + 0.1
+    with pytest.raises(pace.PaceTimeout):
+        p.wait()
+    with pytest.raises(pace.PaceTimeout):
+        p.wait(deadline=clock.t + 60)  # a later deadline does not lift the cap
+    assert clock.slept == [] and isinstance(pace.PaceTimeout("x"), httpx.HTTPError)
+
+
 def test_pace_is_shared_across_threads():
     p = pace.Pace(50)
     stamps: list[float] = []
@@ -335,9 +525,9 @@ def test_every_europe_pmc_and_orcid_call_is_paced(up, monkeypatch):
             super().__init__(10_000)
             self.name = name
 
-        def wait(self, deadline=None):
+        def wait(self, deadline=None, max_wait=None):
             taken.append(self.name)
-            super().wait(deadline)
+            super().wait(deadline, max_wait)
 
     monkeypatch.setattr(pace, "EUROPE_PMC", Counting("epmc"))
     monkeypatch.setattr(pace, "ORCID", Counting("orcid"))

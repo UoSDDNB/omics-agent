@@ -8,14 +8,14 @@ from typing import Annotated
 
 import httpx
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Path, Query
+from fastapi import FastAPI, HTTPException, Path, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field, StringConstraints
 
 load_dotenv()
 
-from . import agent, assay, browse, design, design_check, everywhere, follows, lists, paper, person, preview, process, qc, record, resolve, saved, sources, subset, table, users, volcano, watches, why  # noqa: E402  (needs the API key loaded first)
+from . import agent, assay, browse, design, design_check, everywhere, follows, lists, pace, paper, person, preview, process, qc, record, resolve, saved, sources, subset, table, users, volcano, watches, why  # noqa: E402  (needs the API key loaded first)
 
 HEARTBEAT = 10
 
@@ -371,12 +371,19 @@ def cite_paper(q: str = Query(min_length=6, max_length=300)) -> dict:
         return {}
 
 
+BUSY = "locus is reading Europe PMC for many people at once. Please try again in a few seconds."
+
+
 @app.get("/person")
-def person_page(name: str = Query(min_length=3, max_length=120)) -> dict:
+def person_page(request: Request, name: str = Query(min_length=3, max_length=120)) -> dict:
     """A contributor's papers in Europe PMC (author search by surname and initials), their journals, which papers have
-    supplementary files, and the locus datasets those papers deposited or cite."""
+    supplementary files, and the locus datasets those papers deposited or cite. Rate-limited per caller and overall
+    (follows.PERSON_LIMIT); 503 with Retry-After when the Europe PMC pacing or the upstream cap is full."""
+    follows.PERSON_LIMIT.check(users.client_ip(request))
     try:
         return person.person(name)
+    except pace.PaceTimeout:
+        raise HTTPException(503, BUSY, headers={"Retry-After": str(pace.RETRY_AFTER)})
     except httpx.HTTPError:
         raise HTTPException(502, "Europe PMC did not answer. Please try again.")
 
@@ -389,6 +396,8 @@ def paper_page(identifier: str, offset: int = Query(0, ge=0)) -> dict:
         return paper.paper(identifier, offset)
     except LookupError as error:
         raise HTTPException(404, str(error))
+    except pace.PaceTimeout:
+        raise HTTPException(503, BUSY, headers={"Retry-After": str(pace.RETRY_AFTER)})
     except httpx.HTTPError:
         raise HTTPException(502, "Europe PMC did not answer. Please try again.")
 

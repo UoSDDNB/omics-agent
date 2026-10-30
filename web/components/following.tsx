@@ -16,6 +16,7 @@ const day = (iso: string) => iso.slice(0, 10);
 const LATE: Record<string, string> = {
   failed: "Europe PMC did not answer for this person. Reload the page to try again.",
   late: "Europe PMC took too long for this person, so locus stopped waiting. Reload the page to try again.",
+  wait: "locus read Europe PMC for you a few seconds ago. Reload the page in a moment to read this person.",
   not_checked: `locus reads the ${FOLLOW_LIMITS.checked} people you followed most recently on each visit, and this person is further down.`,
 };
 

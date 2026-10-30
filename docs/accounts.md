@@ -135,24 +135,36 @@ no analytics.
 ## Following researchers
 
 - **By ORCID only.** A person page searches Europe PMC by surname and initials, which mixes people who share a name.
-  So the page also reads the author lists of the name's newest 100 papers and counts the ORCIDs Europe PMC tags on that
-  author. When one ORCID accounts for most of the tagged papers, the page shows it (with the name on the ORCID record)
-  and a Follow button. When several ORCIDs share the tagged papers, the page says the name matches several people; when
-  none is tagged, it says so. Neither offers Follow. Following a guest opens the sign-in prompt, which brings you back.
+  So the page also reads the author lists of the name's newest 100 papers and counts, per ORCID, the papers that tag
+  it on that author (same surname and initials; one initial never stands in for two, so "Thoreen C" is not
+  "Thoreen CC"). The page shows the ORCID and a Follow button only when all of these hold: the name is not common (at
+  most 300 papers, the page's own threshold for "belongs to several people"); the ORCID is tagged on at least 3 of
+  those papers and on more than half of the papers that tag any ORCID there; and the ORCID record's own public name
+  agrees with the page's name (same surname, the same first name when both spell it out, compatible initials
+  otherwise). Otherwise the page says why: the name matches several people, no paper is tagged, too few are, the ORCID
+  record is someone else's, or ORCID did not answer in time ("could not confirm", rechecked after 5 minutes). Following
+  a guest opens the sign-in prompt, which brings you back. The name kept with a follow is the one on the ORCID record.
 - **What following brings.** `/following` lists, for each person, the locus datasets that their ORCID-linked papers
   deposited or cite (Europe PMC `AUTHORID:"<orcid>"`, newest 100 papers, newest paper first). The name search is never
   used, so another person's datasets cannot appear. Each dataset is marked new until you choose "Mark all as seen".
 - **Coverage.** Europe PMC links only part of a person's papers to their ORCID, more often the recent ones (29 Oct:
-  5 of 42 papers for Carson Thoreen). Both pages say how many, e.g. "Europe PMC links 5 of 42 papers under this name to
-  this ORCID; following uses those 5". A dataset from an older paper without the link does not show.
+  5 of 42 papers for Carson Thoreen). The person page says how many of the papers it read carry the ORCID, and how
+  many Europe PMC links to the ORCID in all, e.g. "Europe PMC ties 5 of the 42 papers under this name to this ORCID.
+  Following uses all 7 papers Europe PMC links to the ORCID". A dataset from an older paper without the link does not show.
 - **Watched searches** are listed on `/following` too, each with its link and the day watching started. The page runs
-  none of them (a search uses the model); opening one runs it and marks what is new.
-- **Limits.** 200 follows an account. Each visit to `/following` reads the 40 most recent follows, 4 at a time, within
-  45 seconds; a person not read in time says so. Each ORCID's answer is kept for 6 hours, so a dataset that arrives in
-  Europe PMC or locus shows within that time. Calls to Europe PMC are paced to at most 5 a second and to ORCID at most
-  2 a second across the whole server (`omics_agent/pace.py`); `LOCUS_EPMC_BASE` and `LOCUS_ORCID_BASE` point them
-  elsewhere (the page checks use fixtures).
-- **API:** `GET /person/identity?name=` (anyone); `GET /follows/people`, `POST /follows/people` `{orcid, display_name}`,
+  none of them (a search uses the model), so it shows no new-dataset count for them (DECISIONS D12); opening one runs
+  it and marks what is new.
+- **Limits.** 200 follows an account. Each visit to `/following` reads the 40 most recent follows on one server-wide
+  pool of 4 workers, within 45 seconds; a person not read in time says so. An account reads upstream at most once
+  every 10 seconds (in between, the page shows what is cached), and accounts that follow the same ORCID share one
+  fetch. Each ORCID's answer is kept for 6 hours (a failure for 5 minutes), so a dataset that arrives in Europe PMC or
+  locus shows within that time; person pages keep theirs 6 hours too. Calls to Europe PMC are paced to at most 5 a
+  second and to ORCID at most 2 a second across the whole server (`omics_agent/pace.py`), and no call waits more than
+  2 seconds for its turn: past that, and when more than 8 person reads are under way at once, the answer is 503 with
+  Retry-After and the page says locus is busy. `/person` and `/person/identity` take at most 30 requests a minute
+  from one address and 240 overall. `LOCUS_EPMC_BASE` and `LOCUS_ORCID_BASE` point the upstream calls elsewhere (the
+  page checks use fixtures).
+- **API:** `GET /person/identity?name=` (anyone); `GET /follows/people`, `POST /follows/people` `{orcid}`,
   `DELETE /follows/people` `{orcid}`, `POST /follows/people/seen` `{orcid, accessions}`, `GET /follows/people/updates`.
   Changes need a session, JSON and `X-Locus-Intent: 1`. One account cannot read or change another's follows.
 

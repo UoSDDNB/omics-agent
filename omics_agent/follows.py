@@ -1,31 +1,40 @@
 """Following researchers (F5): who a person page's name is, by ORCID, and the /follows/people routes.
 
 A person page searches Europe PMC by surname and initials, which mixes people who share a name. Following keys on
-ORCID only (DECISIONS D7, after papertok's unverified-identity guard):
+ORCID only (DECISIONS D7, after papertok's unverified-identity guard). `identity(name)` reads the name's newest 100
+papers with their author lists and counts, per ORCID, the papers that tag it on the matching author (same surname,
+compatible initials, where a single initial never stands in for two: "C" is not "CC"). It names an ORCID ("one", the
+only case where the page offers Follow) only when all of these hold:
 
-- `identity(name)` reads the name's newest papers with their author lists and counts the ORCIDs Europe PMC tags on the
-  matching author. It names an ORCID only when one ORCID accounts for most of the ORCID-tagged papers; when several
-  share the tagged papers it says the name matches several people, and when none is tagged it says so. The person
-  page offers Follow only for the first case.
-- What a followed person brings is the datasets locus holds that their ORCID-linked papers deposited or cite
-  (Europe PMC `AUTHORID:"<orcid>"`, never the name query), newest paper first, each marked new until the account marks
-  it seen. Europe PMC links only part of a person's papers to their ORCID (29 Oct: 5 of 42 for Carson Thoreen), and the
-  pages say so.
+- the name is not common: Europe PMC finds at most COMMON_NAME papers under it (the person page's own line says a
+  name past that belongs to several people);
+- the ORCID is tagged on at least MIN_CLAIMED of those papers and on more than half of the papers that tag any
+  ORCID on the matching author;
+- the ORCID record's own public name (ORCID public API) agrees with the page's name: same surname, the same first
+  given name when both spell it out, and compatible initials otherwise. When ORCID does not answer in time, the
+  answer is "unconfirmed" (could not confirm) and kept 5 minutes only.
 
-Bounds: 200 follows an account; one /updates call reads at most 40 of them (newest follows first), 4 at a time, within
-45 seconds overall, and keeps each ORCID's answer for 6 hours. Every upstream call goes through pace.py (Europe PMC at
-most 5 a second, ORCID at most 2 a second, app-wide). Sessions, the CSRF guard and the error shape come from users.py.
+Otherwise the answer is "several" (shared, or common), "none" (no tags) or "unconfirmed" (too few tags, the record is
+someone else's, or the record could not be read). What a followed person brings is the datasets locus holds that
+their ORCID-linked papers deposited or cite (Europe PMC `AUTHORID:"<orcid>"`, never the name query), newest paper
+first, each marked new until the account marks it seen.
+
+Bounds: 200 follows an account; one /updates call reads at most 40 of them (newest follows first) on one shared pool of
+4 workers, within 45 seconds overall, at most once per account every UPDATES_EVERY seconds (in between it answers
+from the cache), with one fetch per ORCID however many accounts ask at once. Answers are kept 6 hours per ORCID,
+failures 5 minutes. /person/identity is rate-limited per caller and overall, and every upstream call goes through
+pace.py (Europe PMC at most 5 a second, ORCID at most 2 a second, app-wide, with a 2 s cap on any wait).
+Sessions, the CSRF guard and the error shape come from users.py.
 """
 
 import json
 import re
 import threading
 import time
-from collections import Counter
-from concurrent.futures import ThreadPoolExecutor, wait
+from concurrent.futures import Future, ThreadPoolExecutor, wait
 
 import httpx
-from fastapi import APIRouter, Depends, FastAPI, Query, Response
+from fastapi import APIRouter, Depends, FastAPI, Query, Request, Response
 from pydantic import BaseModel, Field, field_validator
 
 from . import pace, person, users
@@ -40,11 +49,21 @@ FETCH_MAX = 40
 FETCH_WORKERS = 4
 FETCH_SECONDS = 45.0
 CACHE_SECONDS = 6 * 3600
+FAIL_SECONDS = 5 * 60
+UPDATES_EVERY = 10.0
+ORCID_SECONDS = 5.0
 NAME_MAX = 200
 SEEN_MAX = 500
+SEEN_KEEP = 5000
 PAGE = 100
+COMMON_NAME = 300  # the person page's own threshold (web/components/person.tsx)
+MIN_CLAIMED = 3
 LIMITS = {"follows": MAX_FOLLOWS, "checked": FETCH_MAX, "seen": SEEN_MAX}
 ORCID_ID = re.compile(r"^\d{4}-\d{4}-\d{4}-\d{3}[\dX]$")
+
+# Unauthenticated person reads, per caller address and overall, a minute.
+IDENTITY_LIMIT = users.RateLimiter(per_ip=30, overall=240)
+PERSON_LIMIT = users.RateLimiter(per_ip=30, overall=240)
 
 
 def valid_orcid(value: str) -> bool:
@@ -61,102 +80,173 @@ def valid_orcid(value: str) -> bool:
 # ---------------------------------------------------------------- caches
 
 
-class Cache:
-    """Answers kept for CACHE_SECONDS, per key. Failures are never kept."""
-
-    def __init__(self, seconds: float = CACHE_SECONDS, size: int = 2000):
-        self.seconds, self.size = seconds, size
-        self.lock = threading.Lock()
-        self.items: dict[str, tuple[float, dict]] = {}
-
-    def get(self, key: str) -> dict | None:
-        with self.lock:
-            hit = self.items.get(key)
-            return hit[1] if hit and hit[0] > time.monotonic() - self.seconds else None
-
-    def put(self, key: str, value: dict) -> None:
-        with self.lock:
-            if len(self.items) >= self.size:
-                self.items.pop(next(iter(self.items)))
-            self.items[key] = (time.monotonic(), value)
-
-    def clear(self) -> None:
-        with self.lock:
-            self.items.clear()
-
-
-IDENTITIES = Cache()
-WORK = Cache()
+IDENTITIES = pace.TtlCache(CACHE_SECONDS)
+WORK = pace.TtlCache(CACHE_SECONDS)
+RECORDS = pace.TtlCache(CACHE_SECONDS)
+LAST_UPDATES: dict[int, float] = {}
 
 
 def clear_caches() -> None:
-    IDENTITIES.clear()
-    WORK.clear()
+    """Empties every cache and limiter here (tests)."""
+    for c in (IDENTITIES, WORK, RECORDS, person.PEOPLE):
+        c.clear()
+    LAST_UPDATES.clear()
+    IDENTITY_LIMIT.reset()
+    PERSON_LIMIT.reset()
 
 
 # ---------------------------------------------------------------- who a name is
 
 
+def initials_agree(a: str, b: str) -> bool:
+    """Equal, or one extends the other when both have at least two letters: "CC" and "CCT" agree, "C" and "CC" do not."""
+    return bool(a) and bool(b) and (a == b or (min(len(a), len(b)) >= 2 and (a.startswith(b) or b.startswith(a))))
+
+
+def _initials(author: dict) -> str:
+    return re.sub(r"[^A-Z]", "", (author.get("initials") or "").upper())
+
+
 def _same_author(author: dict, surname: str, initials: str) -> bool:
-    last = person._plain(author.get("lastName") or "")
-    mine = (author.get("initials") or "").replace(".", "").replace(" ", "").upper()
-    return bool(mine) and last == person._plain(surname) and (mine.startswith(initials) or initials.startswith(mine))
+    return person._plain(author.get("lastName") or "") == person._plain(surname) and initials_agree(_initials(author), initials)
 
 
-def orcid_name(orcid: str, deadline: float | None = None) -> str | None:
-    """The public name on an ORCID record, or None when ORCID does not answer or shows none."""
+def _spelled(word: str) -> str | None:
+    """A given name written out ("Carson", "Yu"), folded; None for an initial or a run of initials ("C", "CC", "J.")."""
+    w = word.strip(".")
+    return person._plain(w) if len(w) >= 2 and not w.isupper() else None
+
+
+def _surname(words: list[str]) -> str:
+    return re.sub(r"[\s'-]+", " ", person._plain(" ".join(words))).strip()
+
+
+def names_agree(page: str, given: str | None, family: str | None) -> bool:
+    """Whether a page's name and a record's given and family names can be the same person: the same surname (accents and
+    case aside), the same first given name when both spell it out (then middle initials may be missing on one side),
+    and otherwise initials that agree (initials_agree)."""
+    if not family or not given:
+        return False
+    query = person.author_query(page)
+    if not query:
+        return False
+    split = person.split_name(page)
+    surname, _, page_initials = query.rpartition(" ")
+    if _surname(surname.split()) != _surname(family.split()):
+        return False
+    record_words = given.split()
+    record_initials = person.initials_of(record_words)
+    page_first = _spelled(split[0][0]) if split and split[0] else None
+    record_first = _spelled(record_words[0]) if record_words else None
+    if page_first and record_first:
+        if page_first != record_first:
+            return False
+        return len(page_initials) == 1 or len(record_initials) == 1 or initials_agree(page_initials, record_initials)
+    return initials_agree(page_initials, record_initials)
+
+
+def orcid_record(orcid: str) -> dict | None:
+    """The public name on an ORCID record, {"given", "family", "credit", "display"} (each possibly None), kept 6 hours;
+    None when ORCID does not answer within ORCID_SECONDS (not kept)."""
+    if (hit := RECORDS.get(orcid)) is not None:
+        return hit
     try:
-        name = pace.orcid_get(f"/{orcid}/person", deadline=deadline).get("name") or {}
-    except (httpx.HTTPError, pace.PaceTimeout, ValueError):
+        name = pace.orcid_get(f"/{orcid}/person", timeout=ORCID_SECONDS, deadline=time.monotonic() + ORCID_SECONDS).get("name") or {}
+    except (httpx.HTTPError, ValueError, AttributeError):
         return None
     given, family = (name.get("given-names") or {}).get("value"), (name.get("family-name") or {}).get("value")
     credit = (name.get("credit-name") or {}).get("value")
-    return credit or " ".join(p for p in (given, family) if p) or None
+    out = {"given": given, "family": family, "credit": credit, "display": credit or " ".join(p for p in (given, family) if p) or None}
+    RECORDS.put(orcid, out)
+    return out
+
+
+def record_agrees(page: str, record: dict) -> bool:
+    """The record's given and family names, or its credit name read as a written name, agree with the page's name."""
+    if names_agree(page, record.get("given"), record.get("family")):
+        return True
+    split = person.split_name(record.get("credit") or "")
+    return bool(split) and names_agree(page, " ".join(split[0]), " ".join(split[1]))
 
 
 def identity(name: str) -> dict:
-    """Which ORCID a person page's name stands for, judged from the ORCIDs Europe PMC tags on the matching author of
-    the name's newest 100 papers. status: "one" (orcid set), "several", "none" or "no_name". httpx errors pass through."""
+    """Which ORCID a person page's name stands for, judged from the name's newest 100 papers (see the module doc).
+    status: "one" (orcid set), "several" (reason "shared" or "common"), "none", "unconfirmed" (reason "few",
+    "other_name" or "no_record") or "no_name". httpx errors (PaceTimeout among them) pass through."""
     query = person.author_query(name)
     if not query:
         return {"name": name, "status": "no_name"}
-    if (hit := IDENTITIES.get(query)) is not None:
+    split = person.split_name(name)
+    key = f"{query}|{(_spelled(split[0][0]) if split and split[0] else '') or ''}"
+    if (hit := IDENTITIES.get(key)) is not None:
         return hit | {"name": name}
+    with pace.UPSTREAM:
+        out, seconds = _identity(name, query)
+    IDENTITIES.put(key, out, seconds)
+    return out
+
+
+def _identity(name: str, query: str) -> tuple[dict, float]:
     body = pace.epmc_get("/search", {"query": f'AUTH:"{query}"', "format": "json", "resultType": "core", "pageSize": PAGE, "sort": "P_PDATE_D desc"})
     surname, _, initials = query.rpartition(" ")
-    counts: Counter[str] = Counter()
     results = body["resultList"]["result"]
+    per_orcid: dict[str, int] = {}
+    tagged = 0
     for r in results:
         ids = {(a.get("authorId") or {}).get("value") for a in (r.get("authorList") or {}).get("author", [])
                if (a.get("authorId") or {}).get("type") == "ORCID" and _same_author(a, surname, initials)}
-        counts.update(i for i in ids if i and valid_orcid(i))
-    tagged = sum(counts.values())
-    out = {"name": name, "query": query, "matched": body.get("hitCount", 0), "scanned": len(results), "tagged": tagged, "orcids": len(counts)}
-    if not counts:
-        out["status"] = "none"
-    else:
-        top, claimed = counts.most_common(1)[0]
-        if claimed * 2 <= tagged:
-            out["status"] = "several"
-        else:
-            linked = pace.epmc_get("/search", {"query": f'AUTHORID:"{top}"', "format": "json", "resultType": "lite", "pageSize": 1})
-            out |= {"status": "one", "orcid": top, "claimed": claimed, "linked": linked.get("hitCount", 0), "orcid_name": orcid_name(top)}
-    IDENTITIES.put(query, out)
-    return out
+        ids = {i for i in ids if i and valid_orcid(i)}
+        tagged += bool(ids)
+        for i in ids:
+            per_orcid[i] = per_orcid.get(i, 0) + 1
+    matched = body.get("hitCount", 0)
+    out = {"name": name, "query": query, "matched": matched, "scanned": len(results), "tagged": tagged, "orcids": len(per_orcid)}
+    if matched > COMMON_NAME:
+        return out | {"status": "several", "reason": "common"}, CACHE_SECONDS
+    if not per_orcid:
+        return out | {"status": "none"}, CACHE_SECONDS
+    top, claimed = max(per_orcid.items(), key=lambda kv: (kv[1], kv[0]))
+    if claimed * 2 <= tagged:
+        return out | {"status": "several", "reason": "shared"}, CACHE_SECONDS
+    out |= {"orcid": top, "claimed": claimed}
+    if claimed < MIN_CLAIMED:
+        return out | {"status": "unconfirmed", "reason": "few"}, CACHE_SECONDS
+    record = orcid_record(top)
+    if record is None:
+        return out | {"status": "unconfirmed", "reason": "no_record"}, FAIL_SECONDS
+    out["orcid_name"] = record["display"]
+    if not record_agrees(name, record):
+        return out | {"status": "unconfirmed", "reason": "other_name"}, CACHE_SECONDS
+    linked = pace.epmc_get("/search", {"query": f'AUTHORID:"{top}"', "format": "json", "resultType": "lite", "pageSize": 1})
+    return out | {"status": "one", "linked": linked.get("hitCount", 0)}, CACHE_SECONDS
 
 
 # ---------------------------------------------------------------- what a followed person brings
 
 
+class RecentFailure(httpx.HTTPError):
+    """Europe PMC failed for this ORCID within the last FAIL_SECONDS; not asked again until then."""
+
+
 def work(orcid: str, deadline: float | None = None) -> dict:
     """The datasets locus holds that the ORCID's Europe PMC papers deposited or cite, newest paper first, from at most
-    the newest 100 of those papers. Kept 6 hours per ORCID. httpx errors and PaceTimeout pass through."""
+    the newest 100 of those papers. Kept 6 hours per ORCID; an upstream failure is kept 5 minutes (RecentFailure).
+    httpx errors and PaceTimeout (not kept: it says locus was busy, not that Europe PMC failed) pass through."""
     if (hit := WORK.get(orcid)) is not None:
+        if "failed" in hit:
+            raise RecentFailure(hit["failed"])
         return hit
-    body = pace.epmc_get("/search", {"query": f'AUTHORID:"{orcid}"', "format": "json", "resultType": "lite", "pageSize": PAGE, "sort": "P_PDATE_D desc"},
-                         deadline=deadline)
+    try:
+        body = pace.epmc_get("/search", {"query": f'AUTHORID:"{orcid}"', "format": "json", "resultType": "lite", "pageSize": PAGE, "sort": "P_PDATE_D desc"},
+                             deadline=deadline)
+        results = body["resultList"]["result"]
+    except pace.PaceTimeout:
+        raise
+    except (httpx.HTTPError, KeyError, TypeError, ValueError) as error:
+        WORK.put(orcid, {"failed": str(error)[:200]}, FAIL_SECONDS)
+        raise RecentFailure(str(error)[:200]) from error
     papers = [{"key": r["id"], "pmid": r.get("pmid"), "doi": r.get("doi"), "title": (r.get("title") or "").rstrip("."), "year": r.get("pubYear")}
-              for r in body["resultList"]["result"]]
+              for r in results]
     linked = person.datasets_of(papers)
     datasets: list[dict] = []
     for p in papers:
@@ -166,6 +256,28 @@ def work(orcid: str, deadline: float | None = None) -> dict:
     out = {"linked": body.get("hitCount", 0), "read": len(papers), "datasets": datasets}
     WORK.put(orcid, out)
     return out
+
+
+# One pool for every /updates call, and at most one fetch in flight per ORCID that every caller shares.
+POOL = ThreadPoolExecutor(max_workers=FETCH_WORKERS, thread_name_prefix="follows")
+INFLIGHT: dict[str, Future] = {}
+INFLIGHT_LOCK = threading.RLock()
+
+
+def _fetch(orcid: str, deadline: float) -> Future:
+    with INFLIGHT_LOCK:
+        future = INFLIGHT.get(orcid)
+        if future is None:
+            future = POOL.submit(work, orcid, deadline)
+            INFLIGHT[orcid] = future
+            future.add_done_callback(lambda f, o=orcid: _landed(o, f))
+        return future
+
+
+def _landed(orcid: str, future: Future) -> None:
+    with INFLIGHT_LOCK:
+        if INFLIGHT.get(orcid) is future:
+            del INFLIGHT[orcid]
 
 
 # ---------------------------------------------------------------- routes
@@ -185,15 +297,7 @@ class OrcidIn(BaseModel):
 
 
 class FollowIn(OrcidIn):
-    display_name: str = Field(min_length=1, max_length=NAME_MAX)
-
-    @field_validator("display_name")
-    @classmethod
-    def _name(cls, value: str) -> str:
-        value = " ".join(value.split())
-        if not value:
-            raise ValueError("a follow needs the person's name")
-        return value
+    display_name: str | None = Field(default=None, max_length=NAME_MAX)  # accepted for older clients, not used
 
 
 class SeenIn(OrcidIn):
@@ -229,7 +333,16 @@ def all_follows(user: User = Depends(users.current_user)) -> dict:
 
 @router.post("")
 def follow(body: FollowIn, response: Response, user: User = Depends(users.current_user)) -> dict:
-    """Follows a person by ORCID (201); following someone already followed changes nothing (200)."""
+    """Follows a person by ORCID (201); following someone already followed changes nothing (200). The name kept is the
+    one on the ORCID record, read here; the client's display_name is not used."""
+    with Db() as conn:
+        if conn.execute("SELECT 1 FROM follows WHERE user_id = ? AND kind = 'person' AND orcid = ?", (user.id, body.orcid)).fetchone():
+            return {"added": False}
+    record = orcid_record(body.orcid)
+    if record is None:
+        raise ApiError(503, "UPSTREAM_FAILED", "ORCID did not answer, so locus could not confirm whose record this is. Please try again.", transient=True)
+    if not record["display"]:
+        raise ApiError(422, "ORCID_NO_NAME", "This ORCID record shows no public name, so locus cannot follow it.")
     with Db() as conn:
         conn.execute("BEGIN IMMEDIATE")
         if conn.execute("SELECT 1 FROM follows WHERE user_id = ? AND kind = 'person' AND orcid = ?", (user.id, body.orcid)).fetchone():
@@ -237,9 +350,9 @@ def follow(body: FollowIn, response: Response, user: User = Depends(users.curren
         if conn.execute("SELECT count(*) FROM follows WHERE user_id = ?", (user.id,)).fetchone()[0] >= MAX_FOLLOWS:
             raise ApiError(409, "LIMIT_REACHED", f"An account follows at most {MAX_FOLLOWS} people. Unfollow someone to make room.")
         conn.execute("INSERT INTO follows (user_id, kind, orcid, display_name, followed_at) VALUES (?, 'person', ?, ?, ?)",
-                     (user.id, body.orcid, body.display_name, iso(users.now())))
+                     (user.id, body.orcid, record["display"][:NAME_MAX], iso(users.now())))
     response.status_code = 201
-    return {"added": True}
+    return {"added": True, "display_name": record["display"][:NAME_MAX]}
 
 
 @router.delete("")
@@ -252,13 +365,13 @@ def unfollow(body: OrcidIn, user: User = Depends(users.current_user)) -> dict:
 
 @router.post("/seen")
 def mark_seen(body: SeenIn, user: User = Depends(users.current_user)) -> dict:
-    """Marks datasets of a followed person as seen, keeping the newest 500."""
+    """Marks datasets of a followed person as seen (at most 500 a call), keeping the newest 5000."""
     with Db() as conn:
         row = conn.execute("SELECT * FROM follows WHERE user_id = ? AND kind = 'person' AND orcid = ?", (user.id, body.orcid)).fetchone()
         if not row:
             raise ApiError(404, "FOLLOW_NOT_FOUND", "Your account does not follow this person.")
         old = json.loads(row["seen"])
-        seen = (old + [a for a in body.accessions if a not in old])[-SEEN_MAX:]
+        seen = (old + [a for a in body.accessions if a not in old])[-SEEN_KEEP:]
         conn.execute("UPDATE follows SET seen = ? WHERE id = ?", (json.dumps(seen), row["id"]))
     return {"seen": seen}
 
@@ -266,24 +379,31 @@ def mark_seen(body: SeenIn, user: User = Depends(users.current_user)) -> dict:
 @router.get("/updates")
 def updates(user: User = Depends(users.current_user)) -> dict:
     """For each followed person (the newest 40 follows), the datasets their ORCID-linked papers deposited or cite, each
-    marked new unless seen. status per person: "ok", "failed" (Europe PMC refused or broke), "late" (not read within
-    the 45 s budget) or "not_checked" (past the first 40)."""
+    marked new unless seen. status per person: "ok", "failed" (Europe PMC refused or broke, now or in the last 5
+    minutes), "late" (not read within the 45 s budget, or locus was too busy), "wait" (this account asked moments
+    ago; only cached answers are given until UPDATES_EVERY seconds have passed) or "not_checked" (past the first 40)."""
     rows = _rows(user.id)
-    deadline = time.monotonic() + FETCH_SECONDS
-    pool = ThreadPoolExecutor(max_workers=FETCH_WORKERS)
-    futures = {pool.submit(work, r["orcid"], deadline): r["orcid"] for r in rows[:FETCH_MAX]}
-    wait(futures, timeout=FETCH_SECONDS)
-    pool.shutdown(wait=False, cancel_futures=True)
+    t = time.monotonic()
+    with INFLIGHT_LOCK:
+        fresh = t - LAST_UPDATES.get(user.id, -UPDATES_EVERY) >= UPDATES_EVERY
+        if fresh:
+            LAST_UPDATES[user.id] = t
     answers: dict[str, tuple[str, dict | None]] = {}
-    for future, orcid in futures.items():
-        if not future.done() or future.cancelled():
-            answers[orcid] = ("late", None)
-        elif isinstance(future.exception(), pace.PaceTimeout):
-            answers[orcid] = ("late", None)
-        elif future.exception() is not None:
-            answers[orcid] = ("failed", None)
-        else:
-            answers[orcid] = ("ok", future.result())
+    if fresh:
+        deadline = t + FETCH_SECONDS
+        futures = {_fetch(r["orcid"], deadline): r["orcid"] for r in rows[:FETCH_MAX]}
+        wait(futures, timeout=FETCH_SECONDS)
+        for future, orcid in futures.items():
+            if not future.done() or isinstance(future.exception(), pace.PaceTimeout):
+                answers[orcid] = ("late", None)
+            elif future.exception() is not None:
+                answers[orcid] = ("failed", None)
+            else:
+                answers[orcid] = ("ok", future.result())
+    else:
+        for r in rows[:FETCH_MAX]:
+            hit = WORK.get(r["orcid"])
+            answers[r["orcid"]] = ("wait", None) if hit is None else ("failed", None) if "failed" in hit else ("ok", hit)
     people = []
     for r in rows:
         status, got = answers.get(r["orcid"], ("not_checked", None))
@@ -297,11 +417,16 @@ def updates(user: User = Depends(users.current_user)) -> dict:
 
 
 @public.get("/person/identity")
-def person_identity(name: str = Query(min_length=3, max_length=120)) -> dict:
-    """Which ORCID a contributor's name stands for, as Europe PMC's ORCID tags show it (see identity())."""
+def person_identity(request: Request, name: str = Query(min_length=3, max_length=120)) -> dict:
+    """Which ORCID a contributor's name stands for, as Europe PMC's ORCID tags and the ORCID record show it (see
+    identity()). At most 30 a minute from one address and 240 overall; 503 with Retry-After when locus is busy."""
+    IDENTITY_LIMIT.check(users.client_ip(request))
     try:
         return identity(name)
-    except (httpx.HTTPError, pace.PaceTimeout, KeyError, ValueError):
+    except pace.PaceTimeout:
+        raise ApiError(503, "BUSY", "locus is reading Europe PMC for many people at once. Please try again in a few seconds.", transient=True,
+                       headers={"Retry-After": str(pace.RETRY_AFTER)})
+    except (httpx.HTTPError, KeyError, ValueError):
         raise ApiError(502, "UPSTREAM_FAILED", "Europe PMC did not answer. Please try again.", transient=True)
 
 
