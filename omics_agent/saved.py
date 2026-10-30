@@ -257,6 +257,7 @@ def _resolve(conn, user_id: int, list_ref: str) -> int:
 def add_item(list_ref: str, body: ItemIn, response: Response, user: User = Depends(users.current_user)) -> dict:
     """Adds a dataset; adding one the list already holds changes nothing and answers 200 with "added": false."""
     with Db() as conn:
+        conn.execute("BEGIN IMMEDIATE")  # the existence check, the count and the insert see no other save in between
         list_id = _resolve(conn, user.id, list_ref)
         old = conn.execute("SELECT * FROM list_items WHERE list_id = ? AND accession = ?", (list_id, body.accession)).fetchone()
         if old:
@@ -318,6 +319,7 @@ def import_saved(body: ImportIn, user: User = Depends(users.current_user)) -> di
     the rest are reported in "left_out". "held" lists every accession of the batch that Saved now holds, so the browser
     knows exactly which local copies it may drop."""
     with Db() as conn:
+        conn.execute("BEGIN IMMEDIATE")  # the room count and the inserts see no other import in between
         list_id = saved_list_id(conn, user.id)
         have = {r["accession"] for r in conn.execute("SELECT accession FROM list_items WHERE list_id = ?", (list_id,))}
         room = MAX_ITEMS - len(have)

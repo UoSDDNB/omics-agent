@@ -22,7 +22,11 @@ export type Hit = {
   reason: string; evidence: string; paper: Paper | null; download_plan: string;
 };
 export type AnswerItem = { accession: string; title: string; source: string; kind: "matched" | "cohort" | "ready"; fact: string; anchor: string };
-export type Result = { question: string; plan: Plan; candidates: number; datasets: Hit[]; same_paper: string[][]; answer?: AnswerItem[] };
+export type Result = {
+  question: string; plan: Plan; candidates: number; datasets: Hit[]; same_paper: string[][]; answer?: AnswerItem[];
+  // Set by the browser, not the API: for a watched search, the results this run showed for the first time.
+  new_since?: { since: string; fresh: string[] };
+};
 export type Stage =
   | { stage: "plan"; data: Plan }
   | { stage: "candidates"; data: { count: number } }
@@ -257,25 +261,6 @@ export type Resolved = { kind: "dataset" | "sample" | "paper"; path: string; fou
 // An identifier is one or two words with a digit (for "PMID: 123"); anything else is a question and never leaves the browser.
 // The tab's last search, kept so that back from a dataset page, and the list page, see the same results.
 export const LAST_SEARCH = "locus:last-search";
-
-// A watched search remembers the datasets it showed; a later run marks the ones locus has indexed since.
-const WATCHED = "locus:watched";
-export type Watch = { question: string; since: string; seen: string[] };
-
-export function watches(): Watch[] {
-  try {
-    return JSON.parse(localStorage.getItem(WATCHED) ?? "[]");
-  } catch {
-    return [];
-  }
-}
-
-export function setWatch(question: string, accessions: string[] | null): Watch | null {
-  const rest = watches().filter((w) => w.question !== question);
-  const watch = accessions ? { question, since: new Date().toISOString().slice(0, 10), seen: accessions } : null;
-  localStorage.setItem(WATCHED, JSON.stringify(watch ? [watch, ...rest] : rest));
-  return watch;
-}
 
 export const looksLikeIdentifier = (text: string) => text.length <= 200 && text.trim().split(/\s+/).length <= 2 && /\d/.test(text);
 

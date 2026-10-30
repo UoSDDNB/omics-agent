@@ -279,7 +279,7 @@ export function DatasetRow({ hit, matched, topic, selected, onSelect, branch, co
             <button type="button" onClick={toggle} aria-expanded={expanded} aria-label={`Details of ${hit.accession}`} className="grid w-full min-w-0 cursor-pointer gap-1 text-left">
               <span className="flex min-w-0 flex-wrap items-baseline gap-x-2" title={meta}>
                 <span className="shrink-0 font-mono text-[12px] font-medium text-foreground/80">{shortAccession(hit)}</span>
-                {watched?.fresh.has(hit.accession) && <span className="label shrink-0 text-signal" title={`Not in this search when you started watching it on ${watched.since}`}>new</span>}
+                {watched?.fresh.has(hit.accession) && <span className="label shrink-0 text-signal" data-new-since={watched.since} title={`Not shown by this search before this run. Watching since ${watched.since}.`}>new</span>}
                 <span className="label line-clamp-2 min-w-0 basis-full text-muted-foreground sm:line-clamp-1 sm:basis-0 sm:grow">{meta}</span>
               </span>
               {!branch && hit.paper && (

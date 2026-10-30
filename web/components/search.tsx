@@ -8,7 +8,8 @@ import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import NumberFlow from "@number-flow/react";
 import { cn } from "@/lib/utils";
 import { motionTier } from "@/lib/springs";
-import { LAST_SEARCH, cite, datasetPath, looksLikeCitation, looksLikeIdentifier, rememberFound, resolve, search, watches, type Cited, type Plan, type Result, type Watch } from "@/lib/api";
+import { LAST_SEARCH, cite, datasetPath, looksLikeCitation, looksLikeIdentifier, rememberFound, resolve, search, type Cited, type Plan, type Result } from "@/lib/api";
+import { markSeen, useWatches } from "@/lib/watches";
 import { LINK, MUTED_LINK } from "@/components/page-kit";
 import { MicButton, useDictation } from "@/components/dictation";
 import { SCROLL } from "@/components/result-card";
@@ -132,9 +133,7 @@ export function Search() {
   const [counts, setCounts] = useState<Record<string, number>>({});
   const [result, setResult] = useState<Result | null>(null);
   const [cited, setCited] = useState<{ question: string; paper: Cited } | null>(null);
-  const [watched, setWatched] = useState<Watch[]>([]);
-  // eslint-disable-next-line react-hooks/set-state-in-effect
-  useEffect(() => setWatched(watches()), []);
+  const watched = useWatches().watches;
   const [error, setError] = useState<string | null>(null);
   const [running, setRunning] = useState(false);
   const [seconds, setSeconds] = useState(0);
@@ -236,9 +235,20 @@ export function Search() {
         if (s.stage === "done") {
           setResult(s.data);
           rememberFound(s.data);
-          try {
-            sessionStorage.setItem(LAST, JSON.stringify(s.data));
-          } catch {}
+          const keep = (r: Result) => {
+            try {
+              sessionStorage.setItem(LAST, JSON.stringify(r));
+            } catch {}
+          };
+          keep(s.data);
+          // A watched search marks what this run shows for the first time, then counts it as seen for the next run.
+          const data = s.data;
+          markSeen(data.question, data.datasets.map((d) => d.accession), (n) => {
+            if (controller.signal.aborted) return;
+            const marked = { ...data, new_since: n };
+            setResult(marked);
+            keep(marked);
+          }).catch(() => {});
         }
       }, controller.signal);
     } catch (e) {
@@ -309,9 +319,9 @@ export function Search() {
         </p>
       )}
       {idle && watched.length > 0 && (
-        <ul className="grid justify-items-center gap-1 text-[13px]">
+        <ul className="grid justify-items-center gap-1 text-[13px]" data-watched-list>
           {watched.slice(0, 3).map((w) => (
-            <li key={w.question}>
+            <li key={w.question} data-watched={w.question}>
               <span className="text-muted-foreground">Watching since {w.since}: </span>
               <a href={`/?q=${encodeURIComponent(w.question)}`} className={LINK}>{w.question}</a>
             </li>

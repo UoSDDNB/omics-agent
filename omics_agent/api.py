@@ -15,7 +15,7 @@ from pydantic import BaseModel, Field, StringConstraints
 
 load_dotenv()
 
-from . import agent, assay, browse, design, design_check, everywhere, lists, paper, person, preview, process, qc, record, resolve, saved, sources, subset, table, users, volcano, why  # noqa: E402  (needs the API key loaded first)
+from . import agent, assay, browse, design, design_check, everywhere, lists, paper, person, preview, process, qc, record, resolve, saved, sources, subset, table, users, volcano, watches, why  # noqa: E402  (needs the API key loaded first)
 
 HEARTBEAT = 10
 
@@ -25,6 +25,8 @@ app.add_middleware(CORSMiddleware, allow_origins=["http://localhost:3000", "http
 users.install(app)
 # Saved datasets and named lists under /lists/* (saved.py); the gene-list checker keeps POST /list.
 saved.install(app)
+# Watched searches kept in an account under /follows/questions (watches.py).
+watches.install(app)
 
 
 class SearchIn(BaseModel):

@@ -20,7 +20,7 @@ an account does, what locus stores for it, and what is not built yet.
 
 Account data lives in its own SQLite file, `OMICS_USERS_DB` (default `data/users.db`, not in git), never in
 `omics.db`. For each account: the display name and creation time; each passkey's public key, counter, transports,
-creation and last-use times; hashed recovery codes; your lists and their items (see below); a linked ORCID iD; sessions (a hash of the cookie token, the
+creation and last-use times; hashed recovery codes; your lists and their items and your watched searches (see below); a linked ORCID iD; sessions (a hash of the cookie token, the
 sign-in method, times and the browser's user-agent string); and a short audit trail of sign-ins and changes. locus runs
 no analytics.
 
@@ -72,28 +72,49 @@ no analytics.
   /lists/{id}`, `POST /lists/{id|saved}/items`, `PATCH/DELETE /lists/{id|saved}/items/{accession}`,
   `GET /lists/{id}/export?format=accessions|csv`. Another account's list answers 404, as a missing one does.
 
+## Watched searches
+
+- **Watch.** Above a search's results, "Watch this search" remembers the question, today's date and the datasets the
+  search shows. The home page lists your watched searches under "Watching since". Select the control again to stop
+  watching.
+- **New since.** When a watched search runs again, results it had not shown before are marked "new" and counted next to
+  "Watching since". Those datasets then count as seen, so the run after that marks only what arrived after it. Going
+  back to the same results (from a dataset page, say) keeps that run's marks.
+- **Where they live.** Signed in, watches are kept in your account and follow you to every device. Without an
+  account they live in this browser (localStorage `locus:watched`, same shape) and can be brought into an account
+  with the panel described below.
+- **Limits.** 200 watched searches an account, a question of up to 500 characters, and up to 500 seen datasets a watch
+  (past that, the oldest are dropped, and could be marked new again).
+- **API** (all need a session; changes need JSON and `X-Locus-Intent: 1`): `GET /follows/questions` (newest first),
+  `POST /follows/questions` with `{question, seen}` (starts watching with 201, or for a question already watched adds
+  `seen` to what it has seen and keeps its start date, 200), `DELETE /follows/questions` with `{question}` in the body,
+  and `POST /follows/questions/import` (below).
+
 ## Bringing this browser's saves into an account
 
-- **When.** After you sign in, if this browser still holds datasets you saved as a guest, a panel at the top of the
-  page says how many saved datasets and watched searches it has and asks whether to add them to your account. It
-  appears only when there is at least one saved dataset.
-- **Add** sends every saved dataset to your account's Saved list in one request, in the order you saved them.
-  Adding twice changes nothing: a dataset Saved already holds keeps its note, tags and details. The browser's copies
-  are removed only for the datasets the server confirms it now holds. If Saved would pass 500 datasets, the ones that
-  fit are added and the rest stay in this browser, and the panel says how many.
-- **Not now** leaves everything in this browser (it shows on Lists whenever you are signed out) and is remembered for
-  this browser and this account (localStorage `locus:import-declined`, a list of account ids). Another account signing
-  in from the same browser is asked again.
-- **Watched searches** are counted in the panel but stay in this browser (localStorage `locus:watched`) until the
-  account can keep them (F4, which adds the server table and a numbered users-DB migration for them). F3 adds no
-  table and no migration; the panel's Add covers saved datasets only.
+- **When.** After you sign in, if this browser still holds datasets you saved or searches you watched as a guest, a
+  strip along the bottom of the window says how many of each it has, names up to three of them, and asks whether to add
+  them to your account. It sits over the bottom edge of the page, so nothing on the page moves.
+- **Add** sends the saved datasets to your account's Saved list and the watched searches to your account, one request
+  each, in the order this browser kept them. Adding twice changes nothing: a dataset Saved already holds keeps its note,
+  tags and details, and a search the account already watches keeps its date and what it has seen. The browser's copies
+  are removed only for what the server confirms it now holds. If Saved would pass 500 datasets or the account 200
+  watches, the ones that fit are added and the rest stay in this browser. An entry locus cannot read (a hand-edited
+  accession, say) is not sent and stays in this browser. The strip says how many of each, once: after an Add that left
+  something behind, it is not offered again to that account.
+- **Not now** leaves everything in this browser (saved datasets show on Lists whenever you are signed out) and is
+  remembered for this browser and this account (localStorage `locus:import-declined`, a list of account ids). Another
+  account signing in from the same browser is asked again.
+- **Clear from this browser** removes the guest saves and watches from this browser after a confirmation, for a shared
+  computer where they belong to someone else. Guest state belongs to the browser and is seen by whoever uses it.
 - **API:** `POST /lists/saved/import` with `{"items": [{accession, snapshot, note?, tags?}, …]}`, at most 500 items,
-  each checked exactly as a single save (accession format, snapshot fields bounded, note, tags); one invalid item
-  refuses the whole batch with 422 and adds nothing. The answer lists `added`, `already`, `left_out` and `held`
-  (added plus already). Needs a session, JSON and `X-Locus-Intent: 1`.
+  and `POST /follows/questions/import` with `{"watches": [{question, since, seen}, …]}`, at most 200, `since` a past
+  day as YYYY-MM-DD. Each entry is checked exactly as a single save or watch; one invalid entry refuses the whole batch
+  with 422 and adds nothing. Both answer `added`, `already`, `left_out` and `held` (added plus already). Both need a
+  session, JSON and `X-Locus-Intent: 1`, and each runs as one transaction that no other change interleaves with.
 
 ## Not built yet
 
 Public lists, following researchers, settings (renaming, adding or removing passkeys, new recovery codes, unlinking
-ORCID, deleting the account) and watched searches kept in an account come in later steps. A list cannot be reordered by hand, and the nf-core sample sheet is not offered for a
+ORCID, deleting the account) come in later steps. A list cannot be reordered by hand, and the nf-core sample sheet is not offered for a
 whole list yet. Email is not used.

@@ -56,7 +56,7 @@ export const exportHref = (id: number, format: "accessions" | "csv") => `${API}/
 
 // ---------------------------------------------------------------- guest storage
 
-const GUEST = "locus:saved";
+export const GUEST = "locus:saved";
 
 export function guestItems(): Item[] {
   try {
@@ -184,7 +184,10 @@ export async function newList(name: string): Promise<ListSummary> {
 
 // ---------------------------------------------------------------- bringing guest saves into the account (F3)
 
-export type ImportResult = { list_id: number; added: string[]; already: string[]; left_out: string[]; held: string[] };
+export type ImportResult = { list_id: number; added: string[]; already: string[]; left_out: string[]; held: string[]; skipped: number };
+
+// The API's accession rule (saved.py ACCESSION); an entry outside it would refuse the whole batch, so it is not sent.
+export const ACCESSION = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$/;
 
 const text = (v: unknown, max: number) => (typeof v === "string" ? v.slice(0, max) : "");
 
@@ -203,14 +206,16 @@ function importable(i: Item) {
 
 // Sends this browser's Saved to the account's Saved in one request. Local copies are removed only for the accessions
 // the server says it now holds; anything it could not take stays in this browser.
+// Entries locus cannot read (an accession outside the API's rule) are not sent; they stay and are counted as skipped.
 export async function importGuestSaved(): Promise<ImportResult> {
-  const items = guestItems();
-  const done = await call<ImportResult>("POST", "/lists/saved/import", { items: items.map(importable) });
+  const items = guestItems().map(importable);
+  const good = items.filter((i) => ACCESSION.test(i.accession));
+  const done = await call<Omit<ImportResult, "skipped">>("POST", "/lists/saved/import", { items: good });
   const held = new Set(done.held);
   writeGuest(guestItems().filter((i) => !held.has(i.accession.trim())));
   stale = true;
   await reload();
-  return done;
+  return { ...done, skipped: items.length - good.length };
 }
 
 // Tags typed as "HEK293, riboseq" become ["HEK293", "riboseq"].
