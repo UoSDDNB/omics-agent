@@ -6,18 +6,19 @@ import { ChevronLeft, Download } from "lucide-react";
 import { Wordmark } from "@/components/logo";
 import { BackToResults } from "@/components/back-to-results";
 import { AuthPrompt } from "@/components/auth-prompt";
-import { Heading, LINK, MUTED_LINK } from "@/components/page-kit";
+import { EmptyState, Heading, LINK, MUTED_LINK } from "@/components/page-kit";
 import { Checkbox, SEP } from "@/components/result-card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { datasetPath, repositoryName } from "@/lib/api";
-import { AccountError } from "@/lib/account";
+import { AccountError, signInHref } from "@/lib/account";
 import {
-  LIMITS, deleteList, describeError, editItem, editList, exportHref, getList, newList, parseTags, publishList, reload, removeFrom,
+  LIMITS, addTo, deleteList, describeError, editItem, editList, exportHref, getList, newList, parseTags, publishList, reload, removeFrom,
   shareUrl, unpublishList, useSaved, type Item, type ListDetail, type ListSummary,
 } from "@/lib/lists";
 import { cn } from "@/lib/utils";
+import { toast } from "@/components/toast";
 
 const day = (iso: string) => iso.slice(0, 10);
 const datasets = (n: number) => `${n.toLocaleString()} ${n === 1 ? "dataset" : "datasets"}`;
@@ -90,6 +91,11 @@ export function ListsPage() {
         <GuestSaved />
       ) : (
         <div className="grid gap-10" data-lists-page="signed-in">
+          {saved.lists.every((l) => l.builtin && l.count === 0) ? (
+            <EmptyState id="no-lists" title="No lists yet" ways={[{ href: "/", label: "Search for datasets" }]}>
+              Saved is empty and you have made no named lists. Save a dataset from a search result, or name a new list below.
+            </EmptyState>
+          ) : (
           <table className="w-full border-collapse text-[14px]">
             <thead className="border-b border-foreground">
               <tr className="label text-muted-foreground">
@@ -111,6 +117,7 @@ export function ListsPage() {
               ))}
             </tbody>
           </table>
+          )}
           <section aria-labelledby="new-list" className="grid max-w-xl gap-3">
             <Heading id="new-list">New list</Heading>
             <form onSubmit={create} className="flex flex-wrap gap-3">
@@ -139,13 +146,22 @@ function GuestSaved() {
       <AuthPrompt reason="This list lives only in this browser. With an account, saved datasets, named lists, notes and tags follow you to every device." />
       {error && <p role="alert" className="text-[13px] text-destructive">{error}</p>}
       {items.length === 0 ? (
-        <p className="text-[14px] text-muted-foreground">Nothing saved yet. Use Save on a search result or a dataset page.</p>
+        <EmptyState id="nothing-saved" title="Nothing saved yet" ways={[{ href: "/", label: "Search for datasets" }]}>
+          Use Save on a search result or a dataset page and it appears here.
+        </EmptyState>
       ) : (
         <ul className="grid border-t border-rule">
           {items.map((item) => (
             <li key={item.accession} data-item={item.accession} className="flex items-start justify-between gap-4 border-b border-rule py-4">
               <ItemHead item={item} />
-              <button type="button" onClick={() => removeFrom("saved", item.accession).catch((e) => setError(describeError(e)))} className={cn("shrink-0 text-[13px]", MUTED_LINK)}>
+              <button
+                type="button"
+                onClick={() => removeFrom("saved", item.accession).then(
+                  () => toast({ text: `Removed ${item.accession}`, undo: () => { addTo("saved", item.accession, item.snapshot).catch((e) => toast({ text: describeError(e), error: true })); } }),
+                  (e) => setError(describeError(e)),
+                )}
+                className={cn("shrink-0 text-[13px]", MUTED_LINK)}
+              >
                 Remove
               </button>
             </li>
@@ -187,7 +203,13 @@ export function ListPage({ id }: { id: string }) {
       {saved.status === "loading" ? (
         <p className="text-[13px] text-muted-foreground">Reading the list…</p>
       ) : saved.status === "guest" ? (
-        <AuthPrompt reason="Lists are kept in an account. Sign in to open this one." />
+        <EmptyState
+          id="list-signed-out"
+          title="Sign in to open this list"
+          ways={[{ href: signInHref(`/lists/${id}`), label: "Sign in or create an account" }, { href: "/lists", label: "See what this browser saved" }]}
+        >
+          Lists are kept in an account. Sign in to open this one, and you will come back here.
+        </EmptyState>
       ) : missing ? (
         <p className="text-[14px]">There is no such list in your account. <Link href="/lists" className={LINK}>See all your lists</Link>.</p>
       ) : problem === "failed" || saved.status === "failed" ? (
@@ -301,7 +323,9 @@ function ListBody({ detail, onChange }: { detail: ListDetail; onChange: (d: List
       </header>
 
       {items.length === 0 ? (
-        <p className="text-[14px] text-muted-foreground">This list is empty. Save datasets from a search result or a dataset page, and choose this list with the arrow beside Save.</p>
+        <EmptyState id="empty-list" title="This list is empty" ways={[{ href: "/", label: "Search for datasets" }, { href: "/lists", label: "All lists" }]}>
+          Save datasets from a search result or a dataset page, and choose this list with the arrow beside Save.
+        </EmptyState>
       ) : (
         <ol className="-mt-10 grid">
           {items.map((item) => (

@@ -362,6 +362,7 @@ class RateLimiter:
         self.per_ip, self.overall, self.window = per_ip, overall, window
         self.lock = threading.Lock()
         self.hits: dict[str, deque] = {}
+        self.swept = float("-inf")
 
     def reset(self) -> None:
         with self.lock:
@@ -384,9 +385,16 @@ class RateLimiter:
                 raise ApiError(429, "RATE_LIMITED", f"Too many attempts. Please wait {wait} seconds and try again.", transient=True, headers={"Retry-After": str(wait)})
             mine.append(t)
             everyone.append(t)
-            if len(self.hits) > 10_000:  # forget idle callers
-                for key in [k for k, q in self.hits.items() if not q or q[-1] <= t - self.window]:
-                    del self.hits[key]
+            self._forget(t)
+
+    def _forget(self, t: float) -> None:
+        """Drops every caller with no attempt inside the window, so no address is held longer than a minute (/privacy
+        says so). Runs at most once a second; the overall limit keeps the number of live keys small."""
+        if t - self.swept < 1.0 and len(self.hits) <= 10_000:
+            return
+        self.swept = t
+        for key in [k for k, q in self.hits.items() if not q or q[-1] <= t - self.window]:
+            del self.hits[key]
 
 
 AUTH_LIMIT = RateLimiter(per_ip=10, overall=100)

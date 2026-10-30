@@ -3,6 +3,8 @@ import { Instrument_Serif, Inter_Tight, JetBrains_Mono } from "next/font/google"
 import { MotionConfig } from "framer-motion";
 import { AccountMenu } from "@/components/account-menu";
 import { GuestImport } from "@/components/guest-import";
+import { CommandPalette } from "@/components/command-palette";
+import { Toaster } from "@/components/toast";
 import "./globals.css";
 
 const serif = Instrument_Serif({ variable: "--font-instrument", subsets: ["latin"], weight: "400" });
@@ -24,6 +26,8 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
             <GuestImport />
             {children}
           </main>
+          <Toaster />
+          <CommandPalette />
         </MotionConfig>
       </body>
     </html>

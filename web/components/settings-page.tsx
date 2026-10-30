@@ -5,12 +5,11 @@ import { useSearchParams } from "next/navigation";
 import { ArrowUpRight, Download, KeyRound } from "lucide-react";
 import { Wordmark } from "@/components/logo";
 import { BackToResults } from "@/components/back-to-results";
-import { AuthPrompt } from "@/components/auth-prompt";
 import { ORCID_OUTCOME, RecoveryCodes } from "@/components/account-page";
-import { Heading, LINK, MUTED_LINK } from "@/components/page-kit";
+import { EmptyState, Heading, LINK, MUTED_LINK } from "@/components/page-kit";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { ACCOUNT_EVENT, AccountError, describe, me, orcidStartHref } from "@/lib/account";
+import { ACCOUNT_EVENT, AccountError, describe, me, orcidStartHref, signInHref } from "@/lib/account";
 import { listFollows, orcidUrl, unfollow, type Follow } from "@/lib/follows";
 import {
   addPasskey, confirmCode, confirmPasskey, deleteAccount, exportHref, getSettings, regenerateCodes, removePasskey, rename,
@@ -464,7 +463,13 @@ export function SettingsPage() {
       ) : state === "failed" ? (
         <p role="alert" className="text-[13px]">locus could not read your settings. Reload the page to try again.</p>
       ) : state === "guest" ? (
-        <AuthPrompt reason="Settings belong to an account. Sign in to change your name, passkeys and recovery codes, or to download or delete your data." />
+        <EmptyState
+          id="settings-signed-out"
+          title="Settings belong to an account"
+          ways={[{ href: signInHref("/settings"), label: "Sign in or create an account" }, { href: "/privacy", label: "What locus keeps" }]}
+        >
+          Sign in to change your name, passkeys and recovery codes, or to download or delete your data.
+        </EmptyState>
       ) : state === "deleted" ? (
         <div role="status" className="grid max-w-xl gap-2 text-[14px]">
           <p>Your account and everything in it are gone, and this browser is signed out.</p>

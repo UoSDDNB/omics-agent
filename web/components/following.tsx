@@ -3,7 +3,7 @@ import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { Wordmark } from "@/components/logo";
 import { BackToResults } from "@/components/back-to-results";
-import { Heading, LINK, MUTED_LINK } from "@/components/page-kit";
+import { EmptyState, Heading, LINK, MUTED_LINK } from "@/components/page-kit";
 import { dataType } from "@/components/result-card";
 import { Button } from "@/components/ui/button";
 import { datasetPath, personPath, repositoryName } from "@/lib/api";
@@ -65,17 +65,16 @@ export function FollowingPage() {
 
 function SignedOut() {
   return (
-    <section role="status" aria-labelledby="signed-out" className="grid max-w-xl gap-3" data-following-page="guest">
-      <h2 id="signed-out" className="font-display text-[24px] leading-tight">Following needs an account</h2>
-      <p className="text-[14px] text-muted-foreground">
+    <div data-following-page="guest">
+      <EmptyState
+        id="signed-out"
+        title="Following needs an account"
+        ways={[{ href: signInHref("/following"), label: "Sign in or create an account" }, { href: "/", label: "Back to search" }]}
+      >
         Follow a researcher from their page and locus lists here the datasets their papers deposited or cite, marking the ones you have not
         seen yet. Researchers are followed by ORCID, so a shared name never brings in someone else&apos;s work.
-      </p>
-      <p className="flex flex-wrap gap-x-5 text-[14px]">
-        <Link href={signInHref("/following")} className={LINK}>Sign in or create an account</Link>
-        <Link href="/" className={MUTED_LINK}>Back to search</Link>
-      </p>
-    </section>
+      </EmptyState>
+    </div>
   );
 }
 
@@ -106,14 +105,20 @@ function People() {
       ) : !people ? (
         <p className="text-[13px] text-muted-foreground">Reading their ORCID-linked papers from Europe PMC…</p>
       ) : people.length === 0 ? (
-        <div role="status" className="grid max-w-xl gap-1 text-[13px]" data-following-empty>
-          <p className="font-medium">You follow nobody yet</p>
-          <p className="text-muted-foreground">
+        <div data-following-empty>
+          <EmptyState id="no-people" title="You follow nobody yet" ways={[{ href: "/", label: "Search for datasets" }]}>
             Open a researcher&apos;s page from a dataset or paper and choose Follow. locus offers it when Europe PMC ties their papers to one ORCID.
-          </p>
+          </EmptyState>
         </div>
       ) : (
         <>
+          {fresh === 0 && (
+            <EmptyState id="nothing-new" data="nothing-new" title="Nothing new" ways={[{ href: "/", label: "Search for datasets" }]}>
+              {people.some((p) => (p.datasets ?? []).length > 0)
+                ? "You have seen every dataset below. New ones from the people you follow will be marked here."
+                : "No locus dataset comes from the papers of the people you follow yet. New ones will be marked here."}
+            </EmptyState>
+          )}
           <p className="max-w-[80ch] text-[12.5px] text-muted-foreground">
             Europe PMC links only some of a researcher&apos;s papers to their ORCID, more often the recent ones. locus uses those papers alone,
             so a dataset from an older paper without the ORCID link does not appear here.

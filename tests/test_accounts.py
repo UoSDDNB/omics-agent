@@ -387,6 +387,18 @@ def test_auth_routes_allow_a_hundred_a_minute_overall():
     assert caught.value.status == 429
 
 
+def test_rate_limiter_forgets_an_address_after_a_minute(monkeypatch):
+    # /privacy says the limiter holds addresses in memory for one minute; an idle caller must be gone after that.
+    clock = [1000.0]
+    monkeypatch.setattr(users.time, "monotonic", lambda: clock[0])
+    limiter = users.RateLimiter(per_ip=10, overall=100)
+    limiter.check("203.0.113.7")
+    assert any("203.0.113.7" in k for k in limiter.hits)
+    clock[0] += 61
+    limiter.check("198.51.100.1")
+    assert not any("203.0.113.7" in k for k in limiter.hits)
+
+
 # ---------------------------------------------------------------- ORCID
 
 

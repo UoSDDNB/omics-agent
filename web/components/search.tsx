@@ -10,6 +10,7 @@ import { cn } from "@/lib/utils";
 import { motionTier } from "@/lib/springs";
 import { LAST_SEARCH, cite, datasetPath, looksLikeCitation, looksLikeIdentifier, rememberFound, resolve, search, type Cited, type Plan, type Result } from "@/lib/api";
 import { markSeen, useWatches } from "@/lib/watches";
+import { HOME_EVENT, SEARCH_EVENT, rememberSearch } from "@/lib/recent";
 import { LINK, MUTED_LINK } from "@/components/page-kit";
 import { MicButton, useDictation } from "@/components/dictation";
 import { SCROLL } from "@/components/result-card";
@@ -181,6 +182,29 @@ export function Search() {
     };
   }, [q]);
 
+  // The command palette runs a typed question here when the search page is already open (F8).
+  const opener = useRef(open);
+  const homer = useRef(() => {});
+  useEffect(() => {
+    opener.current = open;
+    homer.current = home;
+  });
+  useEffect(() => {
+    const ask = (e: Event) => {
+      const text = (e as CustomEvent<string>).detail;
+      if (!text?.trim()) return;
+      setQ(text.trim());
+      opener.current(text);
+    };
+    const leave = () => homer.current();
+    window.addEventListener(SEARCH_EVENT, ask);
+    window.addEventListener(HOME_EVENT, leave);
+    return () => {
+      window.removeEventListener(SEARCH_EVENT, ask);
+      window.removeEventListener(HOME_EVENT, leave);
+    };
+  }, []);
+
   useEffect(() => {
     if (!running) return;
     const started = Date.now();
@@ -225,8 +249,13 @@ export function Search() {
     };
     // The bar glides from the centre to the top instead of jumping.
     const still = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-    if (document.startViewTransition && animate && !still) document.startViewTransition(() => flushSync(reset));
-    else reset();
+    // The transition runs its callback a frame or more later, so the search starts only after the reset has happened:
+    // otherwise a fast answer (a cached search) lands first and the late reset wipes it (F4's finding).
+    if (document.startViewTransition && animate && !still) {
+      await document.startViewTransition(() => flushSync(reset)).updateCallbackDone.catch(() => {});
+      if (controller.signal.aborted) return;
+    } else reset();
+    rememberSearch(question);
     try {
       await search(question, (s) => {
         if (controller.signal.aborted) return;

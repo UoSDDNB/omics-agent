@@ -6,7 +6,7 @@ export const PRIVACY_PATH = "/privacy";
 
 // One paragraph for /settings.
 export const PRIVACY_SUMMARY =
-  "For an account, locus keeps your display name, the public half of each passkey, scrambled copies of your recovery codes and sign-in tokens, which browser each sign-in came from, your ORCID iD if you link one, your lists with their notes and tags, your watched searches, the people you follow, and a short log of account events such as sign-ins. It runs no analytics. It sets one cookie that keeps you signed in, and a short-lived one during an ORCID sign-in.";
+  "For an account, locus keeps your display name, the public half of each passkey, scrambled copies of your recovery codes and sign-in tokens, which browser each sign-in came from, your ORCID iD if you link one, your lists with their notes and tags, your watched searches, the people you follow, and a log of account events such as sign-ins, kept until you delete the account. Like most web servers, it also logs each request with your IP address. It runs no analytics. It sets one cookie that keeps you signed in, and a short-lived one during an ORCID sign-in.";
 
 export type PrivacyFact = { id: string; title: string; body: string[] };
 
@@ -15,7 +15,8 @@ export const PRIVACY_FACTS: PrivacyFact[] = [
     id: "without-an-account",
     title: "Without an account",
     body: [
-      "Searching and reading dataset pages need no account. Datasets you save without one stay in this browser's local storage and never reach the server until you sign in and choose to bring them into an account.",
+      "Searching and reading dataset pages need no account. Datasets you save and searches you watch without one stay in this browser's local storage and never reach the server until you sign in and choose to bring them into an account.",
+      "The browser also keeps your last eight questions for the Go to box, the dataset records you opened from a search, and whether you declined to bring saved items into an account. These stay in this browser and are never sent to the server.",
     ],
   },
   {
@@ -29,7 +30,7 @@ export const PRIVACY_FACTS: PrivacyFact[] = [
       "Your ORCID iD, if you link one.",
       "Your lists with their items, notes and tags, and the public copy of any list you share.",
       "Your watched searches and the people you follow, with the datasets you marked as seen.",
-      "A short log of account events such as sign-ins, new passkeys and new recovery codes.",
+      "A log of account events such as sign-ins, new passkeys and new recovery codes, kept until you delete the account.",
     ],
   },
   {
@@ -45,6 +46,8 @@ export const PRIVACY_FACTS: PrivacyFact[] = [
     title: "Where it is kept",
     body: [
       "Account data lives in its own database file on the server that runs locus, apart from the public dataset catalogue. It is not shared or sold.",
+      "Like most web servers, the server's request log records your IP address, the time and the address of each page or search you open. How long it is kept depends on how the server is set up; it is not part of the account data and deleting an account does not touch it.",
+      "The limit on sign-in attempts holds your address in memory for one minute and never writes it down.",
       "An ORCID sign-in asks ORCID only for your iD and name. To show what is new from the people you follow, the server looks up their ORCID iDs in Europe PMC; your own identity is not part of that request.",
     ],
   },

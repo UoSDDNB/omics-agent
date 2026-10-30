@@ -215,7 +215,11 @@ Privacy section of `/settings` render; change it together with this section when
   every device, recovery codes, the ORCID link, pending sign-in challenges, lists and items (public links answer 404 at
   once), watched searches, follows and the account's activity log. The browser's cookie is then cleared. What stays:
   one activity row with the time and "account deleted", with no user id, name or anything else that points at the
-  person, so whoever runs the server can count deletions. Server logs outside the users DB are not touched.
+  person, so whoever runs the server can count deletions. Server logs outside the users DB are not touched: uvicorn's access log (on by default) records the client address,
+  taken from `X-Forwarded-For` behind the local proxy, and the full request line, including search query strings and
+  `/s/<id>` paths, and the reverse proxy on the public host logs the same. Their retention is the host's log settings.
+  The sign-in rate limiter keeps addresses in process memory only, and drops each one a minute after its last attempt.
+  /privacy (web/lib/privacy.ts) says all of this in plain words.
 - **Confirming it is you.** Deleting the account, making new recovery codes, adding a passkey, removing a passkey,
   unlinking ORCID and linking ORCID to an account that has a passkey need a passkey or recovery-code check within the
   last five minutes. Signing in with a passkey or a recovery code counts; so does "Confirm with a passkey"
@@ -225,8 +229,10 @@ Privacy section of `/settings` render; change it together with this section when
   There is no other way to set it.
 - **A new passkey cannot confirm the session that added it.** A passkey added from Settings records the session that
   added it (`credentials.added_in_session`); the confirm routes neither offer nor accept it in that session. It confirms
-  from its own next sign-in on. Without this rule a stolen session cookie could add its own passkey, confirm with it and
-  then remove the owner's passkeys, replace the recovery codes or delete the account.
+  from its own next sign-in on. This is defence in depth only: adding a passkey already needs a confirmation within
+  the last five minutes, and that is the real guard. A passkey sign-in with the new key is strong at once, so the rule
+  mostly adds friction (F7-r2-3). The residual risk is the usual step-up trade-off: a cookie stolen within five minutes
+  of a confirmation can add a lasting passkey, which the owner sees only in the passkey list and the export's log.
 - **An account made by ORCID.** It has no passkey and no recovery codes, so it has nothing to confirm with. Its one
   exception: it may add its first passkey within five minutes of an ORCID sign-in on this session (signing in with
   ORCID again while signed in, with the same iD, counts). Confirm says so and offers "Add a passkey". To delete such an

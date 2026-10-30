@@ -1,6 +1,5 @@
 "use client";
-import { useCallback, useEffect, useRef, useState } from "react";
-import { createPortal } from "react-dom";
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { Bookmark, ChevronDown, Plus } from "lucide-react";
@@ -9,40 +8,7 @@ import { LINK, MUTED_LINK } from "@/components/page-kit";
 import { signInHref } from "@/lib/account";
 import { addTo, describeError, isSaved, newList, removeFrom, savedList, useSaved, type Snapshot } from "@/lib/lists";
 import { cn } from "@/lib/utils";
-
-type Toast = { text: string; undo?: () => void; pick?: boolean; error?: boolean };
-
-// A short message at the foot of the screen. Success clears itself after six seconds; an error stays until closed.
-function ToastLine({ toast, onClose, onPick }: { toast: Toast; onClose: () => void; onPick: () => void }) {
-  useEffect(() => {
-    if (toast.error) return;
-    const t = setTimeout(onClose, 6000);
-    return () => clearTimeout(t);
-  }, [toast, onClose]);
-  return createPortal(
-    <div role="status" data-toast className="fixed inset-x-0 bottom-5 z-50 flex justify-center px-5">
-      <div className={cn("flex items-baseline gap-3 rounded-lg px-4 py-2.5 text-[13px] shadow-sm", toast.error ? "border border-rule bg-card text-destructive" : "bg-foreground text-background")}>
-        <span>{toast.text}</span>
-        {toast.pick && (
-          <button type="button" onClick={onPick} className="underline decoration-background/40 underline-offset-4 hover:decoration-background">
-            Add to a list
-          </button>
-        )}
-        {toast.undo && (
-          <button type="button" onClick={() => { toast.undo?.(); onClose(); }} className="underline decoration-background/40 underline-offset-4 hover:decoration-background">
-            Undo
-          </button>
-        )}
-        {toast.error && (
-          <button type="button" onClick={onClose} className={MUTED_LINK}>
-            Close
-          </button>
-        )}
-      </div>
-    </div>,
-    document.body,
-  );
-}
+import { toast, type Toast } from "@/components/toast";
 
 // Save on a result row or a dataset page: one click keeps the dataset in "Saved"; the arrow opens the list picker.
 // `snapshot` comes from what the page already shows (the search hit or the dataset record); null until it is known.
@@ -51,10 +17,8 @@ export function SaveControl({ accession, snapshot, compact = false }: { accessio
   const pathname = usePathname();
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [toast, setToast] = useState<Toast | null>(null);
   const [name, setName] = useState("");
   const box = useRef<HTMLDivElement>(null);
-  const closeToast = useCallback(() => setToast(null), []);
   const picker = useRef<HTMLButtonElement>(null);
   const on = isSaved(saved, accession);
   const ready = !!snapshot && (saved.status === "guest" || saved.status === "signed-in");
@@ -72,19 +36,24 @@ export function SaveControl({ accession, snapshot, compact = false }: { accessio
     setBusy(true);
     try {
       await work();
-      if (done) setToast(done);
+      if (done) toast(done);
     } catch (e) {
-      setToast({ text: describeError(e), error: true });
+      toast({ text: describeError(e), error: true });
     } finally {
       setBusy(false);
     }
   }
 
   const where = saved.status === "guest" ? "Saved in this browser" : "Saved";
+  // After a save the toast offers the list picker and, for a guest, the way to what this browser has saved (F2-r1-1).
+  const picks = [
+    { label: "Add to a list", onClick: () => setOpen(true) },
+    ...(saved.status === "guest" ? [{ label: "See saved", href: "/lists" }] : []),
+  ];
   function toggleSaved() {
     if (!snapshot) return;
     if (on) run(() => removeFrom("saved", accession), { text: "Removed from Saved", undo: () => run(() => addTo("saved", accession, snapshot)) });
-    else run(() => addTo("saved", accession, snapshot), { text: where, pick: true, undo: () => run(() => removeFrom("saved", accession)) });
+    else run(() => addTo("saved", accession, snapshot), { text: where, actions: picks, undo: () => run(() => removeFrom("saved", accession)) });
   }
 
   function toggleList(id: number, held: boolean, listName: string) {
@@ -149,6 +118,7 @@ export function SaveControl({ accession, snapshot, compact = false }: { accessio
               <p className="text-[12px] leading-snug text-muted-foreground">
                 Named lists, notes and tags need an account. <Link href={signInHref(pathname)} className={LINK}>Sign in</Link> to keep them on every device.
               </p>
+              <Link href="/lists" className={cn("w-fit text-[12px]", MUTED_LINK)} data-see-saved>See what this browser saved</Link>
             </>
           ) : (
             <>
@@ -187,7 +157,6 @@ export function SaveControl({ accession, snapshot, compact = false }: { accessio
           )}
         </div>
       )}
-      {toast && <ToastLine toast={toast} onClose={closeToast} onPick={() => { setToast(null); setOpen(true); }} />}
     </div>
   );
 }
