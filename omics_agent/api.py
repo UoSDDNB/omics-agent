@@ -15,7 +15,7 @@ from pydantic import BaseModel, Field, StringConstraints
 
 load_dotenv()
 
-from . import agent, assay, browse, design, design_check, everywhere, follows, lists, pace, paper, person, preview, process, qc, record, resolve, saved, sources, subset, table, users, volcano, watches, why  # noqa: E402  (needs the API key loaded first)
+from . import agent, assay, browse, design, design_check, everywhere, follows, lists, pace, paper, person, preview, process, qc, record, resolve, saved, settings, sources, subset, table, users, volcano, watches, why  # noqa: E402  (needs the API key loaded first)
 
 HEARTBEAT = 10
 
@@ -29,6 +29,8 @@ saved.install(app)
 watches.install(app)
 # Followed researchers by ORCID under /follows/people, and /person/identity for the person page (follows.py).
 follows.install(app)
+# Settings under /account (settings.py): name, passkeys, recovery codes, ORCID unlink, export, delete the account.
+settings.install(app)
 
 
 class SearchIn(BaseModel):

@@ -31,6 +31,8 @@ DEFAULT_DB = Path(__file__).resolve().parent.parent / "data" / "users.db"
 MIGRATIONS = Path(__file__).resolve().parent / "migrations" / "users"
 COOKIE = "locus_session"
 SESSION_DAYS = 30
+STRONG_METHODS = ("passkey", "recovery")  # sign-ins that prove the person holds the account's passkey or codes
+STRONG_WINDOW = timedelta(minutes=5)  # how recent such a sign-in must be to delete the account or regenerate codes
 SESSION_REFRESH = timedelta(hours=1)  # how stale last_seen_at may get before a request slides the expiry forward
 # Paths whose errors (including request validation) use the shared {"error": {...}} shape. Later routers add theirs.
 SHAPED_PREFIXES = ["/account"]
@@ -192,8 +194,8 @@ def start_session(conn: sqlite3.Connection, response: Response, user_id: int, me
     token = secrets.token_urlsafe(32)
     t = now()
     conn.execute(
-        "INSERT INTO sessions (token_sha256, user_id, method, created_at, expires_at, last_seen_at, user_agent) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (sha256(token), user_id, method, iso(t), iso(t + timedelta(days=SESSION_DAYS)), iso(t), user_agent[:300]),
+        "INSERT INTO sessions (token_sha256, user_id, method, created_at, expires_at, last_seen_at, user_agent, strong_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (sha256(token), user_id, method, iso(t), iso(t + timedelta(days=SESSION_DAYS)), iso(t), user_agent[:300], iso(t) if method in STRONG_METHODS else None),
     )
     audit(conn, user_id, f"signed in ({method})")
     set_cookie(response, token)
@@ -220,6 +222,15 @@ class User:
     created_at: str
     session_method: str
     session_created_at: str
+    strong_at: str | None = None  # the session's last passkey or recovery-code sign-in or confirmation
+    token_sha256: str = ""
+
+    def strong_until(self) -> str | None:
+        """Until when this session may delete the account or regenerate recovery codes; None when it may not now."""
+        if not self.strong_at:
+            return None
+        until = datetime.strptime(self.strong_at, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc) + STRONG_WINDOW
+        return iso(until) if until > now() else None
 
     def public(self, conn: sqlite3.Connection | None = None) -> dict:
         """What the browser may know about the signed-in account."""
@@ -244,7 +255,7 @@ def optional_user(request: Request, response: Response) -> User | None:
     digest, t = sha256(token), now()
     with Db() as conn:
         row = conn.execute(
-            "SELECT s.user_id, s.method, s.created_at AS session_created_at, s.expires_at, s.last_seen_at, u.display_name, u.created_at "
+            "SELECT s.user_id, s.method, s.created_at AS session_created_at, s.expires_at, s.last_seen_at, s.strong_at, u.display_name, u.created_at "
             "FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token_sha256 = ?",
             (digest,),
         ).fetchone()
@@ -256,7 +267,7 @@ def optional_user(request: Request, response: Response) -> User | None:
         if row["last_seen_at"] <= iso(t - SESSION_REFRESH):
             conn.execute("UPDATE sessions SET last_seen_at = ?, expires_at = ? WHERE token_sha256 = ?", (iso(t), iso(t + timedelta(days=SESSION_DAYS)), digest))
             set_cookie(response, token)
-    return User(row["user_id"], row["display_name"], row["created_at"], row["method"], row["session_created_at"])
+    return User(row["user_id"], row["display_name"], row["created_at"], row["method"], row["session_created_at"], row["strong_at"], digest)
 
 
 def current_user(user: User | None = Depends(optional_user)) -> User:
@@ -264,6 +275,21 @@ def current_user(user: User | None = Depends(optional_user)) -> User:
     if user is None:
         raise ApiError(401, "SIGN_IN_REQUIRED", "Sign in to do this.")
     return user
+
+
+def require_strong(user: User) -> None:
+    """Refuses (403 CONFIRM_REQUIRED) unless this session saw a passkey or recovery-code sign-in in the last five
+    minutes. A dev sign-in or ORCID sign-in never counts; /account/confirm/* records a fresh one on the session."""
+    if user.strong_until() is None:
+        raise ApiError(403, "CONFIRM_REQUIRED", "Confirm it is you with your passkey or a recovery code first. The confirmation lasts five minutes.")
+
+
+def mark_strong(conn: sqlite3.Connection, user: User) -> str:
+    """Records a passkey or recovery-code confirmation on the user's current session; returns its time."""
+    t = iso(now())
+    conn.execute("UPDATE sessions SET strong_at = ? WHERE token_sha256 = ? AND user_id = ?", (t, user.token_sha256, user.id))
+    user.strong_at = t
+    return t
 
 
 # ---------------------------------------------------------------- CSRF guard

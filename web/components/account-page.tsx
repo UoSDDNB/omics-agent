@@ -31,7 +31,7 @@ function Fact({ label, children }: { label: string; children: React.ReactNode })
   );
 }
 
-function RecoveryCodes({ codes, onDone }: { codes: string[]; onDone: () => void }) {
+export function RecoveryCodes({ codes, onDone }: { codes: string[]; onDone: () => void }) {
   const [copied, setCopied] = useState(false);
   return (
     <section aria-labelledby="codes" className="grid max-w-xl gap-4">

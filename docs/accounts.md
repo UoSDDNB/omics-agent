@@ -83,6 +83,8 @@ no analytics.
   (`robots: noindex`) and sends no referrer.
 - **A frozen copy.** The public page keeps what the list held when you published. After any change the list's page
   says so ("the public page still shows the earlier version") with "Update public page", which keeps the same link.
+  Each list counts its changes, and the copy remembers the count it was taken at, so a change made in the same second
+  as publishing still shows as one. When the list holds more than 50 datasets the page says "Showing the first 50 of N".
 - **Stop sharing** removes the copy at once: the link then answers 404, the same as a link that never existed.
   Publishing again draws a new link. Deleting the list or the account withdraws it too.
 - **Limits.** 60 publishes and updates an account in any 24 hours (counted on the server); stopping is never limited.
@@ -167,6 +169,38 @@ no analytics.
 - **API:** `GET /person/identity?name=` (anyone); `GET /follows/people`, `POST /follows/people` `{orcid}`,
   `DELETE /follows/people` `{orcid}`, `POST /follows/people/seen` `{orcid, accessions}`, `GET /follows/people/updates`.
   Changes need a session, JSON and `X-Locus-Intent: 1`. One account cannot read or change another's follows.
+
+## Settings
+
+`/settings` (Settings in the account menu) has five sections.
+
+- **Account.** Change the display name (a public list keeps the name it was published with until you update it).
+  Passkeys are listed with their name, when they were added and last used; each can be renamed, another can be added
+  with the same passkey ceremony as creating an account, and any can be removed except the last one. Recovery codes
+  show how many of ten are left; "Make ten new codes" shows the new ones once and the old ones stop working. ORCID
+  shows the linked iD with Unlink (refused when ORCID is the account's only way in, i.e. no passkey), or a link button
+  when ORCID is configured.
+- **Following.** The people you follow and your watched searches, each with Unfollow or Stop watching.
+- **Privacy.** One paragraph on what locus keeps for an account (above) and that it runs no analytics.
+- **Your data.** "Download everything as JSON" (`GET /account/export`) returns every row the users DB holds about the
+  account: name, passkey names and dates, sessions (method, times, browser), how many recovery codes are left and when
+  codes were used, the ORCID link, lists with items, notes, tags and the public copy, watched searches, follows and the
+  account's activity log. It leaves out secrets: session token hashes, recovery code hashes, passkey public keys and the
+  WebAuthn user handle. No other account's rows are included.
+- **Delete account.** Deletes the account and everything in it in one transaction: the user row, passkeys, sessions on
+  every device, recovery codes, the ORCID link, pending sign-in challenges, lists and items (public links answer 404 at
+  once), watched searches, follows and the account's activity log. The browser's cookie is then cleared. What stays:
+  one activity row with the time and "account deleted", with no user id, name or anything else that points at the
+  person, so whoever runs the server can count deletions. Server logs outside the users DB are not touched.
+- **Confirming it is you.** Deleting the account and making new recovery codes need a passkey or recovery-code check
+  within the last five minutes. Signing in with a passkey or a recovery code counts; so does "Confirm with a passkey"
+  or "Confirm with a recovery code" on the page (`POST /account/confirm/options` + `/confirm/verify`, or
+  `/confirm/recovery`), which accepts only the signed-in account's own passkeys and codes and records the time on the
+  session (`sessions.strong_at`). A recovery code used to confirm is spent. ORCID and the test sign-in never count, so
+  an account made by ORCID alone adds a passkey first. There is no other way to set it.
+- **API.** `GET /account/settings`, `PATCH /account/profile`, `PATCH|DELETE /account/passkeys/{id}`,
+  `POST /account/passkeys/options|verify`, `POST /account/recovery-codes`, `DELETE /account/orcid`,
+  `GET /account/export`, `DELETE /account`; all JSON with `X-Locus-Intent: 1` for changes.
 
 ## Not built yet
 
