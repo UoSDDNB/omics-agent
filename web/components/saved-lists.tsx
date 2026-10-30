@@ -7,15 +7,15 @@ import { Wordmark } from "@/components/logo";
 import { BackToResults } from "@/components/back-to-results";
 import { AuthPrompt } from "@/components/auth-prompt";
 import { Heading, LINK, MUTED_LINK } from "@/components/page-kit";
-import { SEP } from "@/components/result-card";
+import { Checkbox, SEP } from "@/components/result-card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { datasetPath, repositoryName } from "@/lib/api";
 import { AccountError } from "@/lib/account";
 import {
-  LIMITS, deleteList, describeError, editItem, editList, exportHref, getList, newList, parseTags, reload, removeFrom, useSaved,
-  type Item, type ListDetail,
+  LIMITS, deleteList, describeError, editItem, editList, exportHref, getList, newList, parseTags, publishList, reload, removeFrom,
+  shareUrl, unpublishList, useSaved, type Item, type ListDetail, type ListSummary,
 } from "@/lib/lists";
 import { cn } from "@/lib/utils";
 
@@ -238,13 +238,16 @@ function ListBody({ detail, onChange }: { detail: ListDetail; onChange: (d: List
     router.push("/lists");
   });
 
+  // Any change to the list makes its public page out of date until the owner updates it (the server says the same).
+  const changed = (l: ListSummary): ListSummary => (l.public ? { ...l, public: { ...l.public, stale: true } } : l);
+
   const dropItem = (accession: string) => act(async () => {
     await removeFrom(list.id, accession);
-    onChange({ ...detail, list: { ...list, count: list.count - 1 }, items: items.filter((i) => i.accession !== accession) });
+    onChange({ ...detail, list: changed({ ...list, count: list.count - 1 }), items: items.filter((i) => i.accession !== accession) });
   });
 
   const putItem = useCallback((item: Item) => {
-    onChange({ ...detail, items: detail.items.map((i) => (i.accession === item.accession ? item : i)) });
+    onChange({ ...detail, list: changed(detail.list), items: detail.items.map((i) => (i.accession === item.accession ? item : i)) });
   }, [detail, onChange]);
 
   return (
@@ -294,6 +297,7 @@ function ListBody({ detail, onChange }: { detail: ListDetail; onChange: (d: List
           </div>
         )}
         {error && <p role="alert" className="text-[13px] text-destructive">{error}</p>}
+        <Sharing list={list} onChange={(l) => onChange({ ...detail, list: l })} />
       </header>
 
       {items.length === 0 ? (
@@ -306,6 +310,99 @@ function ListBody({ detail, onChange }: { detail: ListDetail; onChange: (d: List
         </ol>
       )}
     </div>
+  );
+}
+
+// Public link (papertok's public lists): publish a frozen copy at /s/<id>, update it, or stop sharing (the link then
+// answers 404). Showing the owner's name and including notes are both off unless ticked; tags are never published.
+function Sharing({ list, onChange }: { list: ListSummary; onChange: (l: ListSummary) => void }) {
+  const pub = list.public;
+  const [open, setOpen] = useState(false);
+  const [showOwner, setShowOwner] = useState(pub?.show_owner ?? false);
+  const [includeNotes, setIncludeNotes] = useState(pub?.include_notes ?? false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [copied, setCopied] = useState(false);
+  const [said, setSaid] = useState("");
+  const max = LIMITS.public_items ?? 50;
+
+  async function act(work: () => Promise<{ list: ListSummary }>, message: string) {
+    setBusy(true);
+    setError("");
+    try {
+      const done = await work();
+      onChange(done.list);
+      setOpen(false);
+      setSaid(message);
+      await reload();
+    } catch (e) {
+      setError(describeError(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+  const publish = () => act(() => publishList(list.id, { show_owner: showOwner, include_notes: includeNotes }), pub ? "The public page now shows the list as it is." : "The list is public. Anyone with the link can open it.");
+  const stop = () => act(() => unpublishList(list.id), "The list is private again. Its link no longer opens.");
+  const url = pub ? shareUrl(pub.share_id) : "";
+  const copy = () => navigator.clipboard.writeText(url).then(() => setCopied(true), () => setError("The link could not be copied. Select it and copy it by hand."));
+
+  const choices = (
+    <div className="grid max-w-xl gap-3 border-l-2 border-foreground pl-4 text-[14px]" data-share-form>
+      <p className="text-muted-foreground">
+        Anyone with the link can see this list’s name, description and {list.count > max ? `the first ${max} of its datasets` : "its datasets"}, as they are when you publish. Tags stay private. The link cannot be guessed and is listed nowhere.
+      </p>
+      <span className="flex items-start gap-3">
+        <Checkbox checked={showOwner} onChange={() => setShowOwner((v) => !v)} label="Show my display name" />
+        <span>Show my display name</span>
+      </span>
+      <span className="flex items-start gap-3">
+        <Checkbox checked={includeNotes} onChange={() => setIncludeNotes((v) => !v)} label="Include my notes" />
+        <span>Include my notes</span>
+      </span>
+      <div className="flex gap-3">
+        <Button disabled={busy} onClick={publish}>{busy ? "Publishing…" : pub ? "Update public page" : "Publish"}</Button>
+        <Button variant="outline" disabled={busy} onClick={() => setOpen(false)}>Cancel</Button>
+      </div>
+    </div>
+  );
+
+  return (
+    <section aria-label="Sharing" className="grid gap-3 text-[13px]" data-sharing={pub ? "public" : "private"}>
+      <p className="sr-only" role="status" aria-live="polite">{said}</p>
+      {pub ? (
+        <>
+          <p className="flex min-w-0 flex-wrap items-baseline gap-x-2 gap-y-1">
+            <span className="label text-muted-foreground">Public</span>
+            <a href={url} className={cn("min-w-0 truncate font-mono text-[12px]", LINK)} data-share-link>{url}</a>
+            <span className="text-muted-foreground" aria-hidden>·</span>
+            <button type="button" onClick={copy} onBlur={() => setCopied(false)} className={MUTED_LINK}>{copied ? "Copied" : "Copy"}</button>
+            <span className="text-muted-foreground" aria-hidden>·</span>
+            <button type="button" disabled={busy} onClick={stop} className={MUTED_LINK} data-unpublish>Stop sharing</button>
+            {!open && (
+              <>
+                <span className="text-muted-foreground" aria-hidden>·</span>
+                <button type="button" onClick={() => setOpen(true)} className={MUTED_LINK}>Change what it shows</button>
+              </>
+            )}
+          </p>
+          <p className="font-mono text-[12px] tabular text-muted-foreground">
+            published {day(pub.published_at)}{pub.show_owner ? " · with your name" : ""}{pub.include_notes ? " · with your notes" : ""}
+          </p>
+          {pub.stale && !open && (
+            <p className="flex flex-wrap items-baseline gap-x-3 gap-y-1 text-warn" data-share-stale>
+              You changed this list after publishing, so the public page still shows the earlier version.
+              <button type="button" disabled={busy} onClick={publish} className={LINK}>{busy ? "Updating…" : "Update public page"}</button>
+            </p>
+          )}
+        </>
+      ) : !open && (
+        <p>
+          <button type="button" onClick={() => setOpen(true)} className={MUTED_LINK} data-share-open>Share a public link</button>
+        </p>
+      )}
+      {open && choices}
+      {error && <p role="alert" className="text-destructive">{error}</p>}
+    </section>
   );
 }
 

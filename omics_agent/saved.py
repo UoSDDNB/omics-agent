@@ -12,6 +12,8 @@ import csv
 import io
 import json
 import re
+import secrets
+from datetime import timedelta
 from typing import Literal
 
 from fastapi import APIRouter, Depends, FastAPI, Query, Response
@@ -33,7 +35,10 @@ TAG_MAX = 40
 ACCESSION = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$")
 # Display names of repositories whose id is not already readable; the web app's repositoryName uses the same table.
 REPOSITORY_NAMES = {"MetabolomicsWorkbench": "Metabolomics Workbench", "ExpressionAtlas": "Expression Atlas", "PanoramaPublic": "Panorama Public"}
-LIMITS = {"lists": MAX_LISTS, "items": MAX_ITEMS, "name": NAME_MAX, "description": DESCRIPTION_MAX, "note": NOTE_MAX, "tags": TAGS_MAX, "tag": TAG_MAX}
+PUBLIC_ITEMS = 50  # items a public page shows (papertok's limit)
+PUBLISH_PER_DAY = 60  # publishes and updates per account in any 24 hours
+SHARE_ID = re.compile(r"^[0-9a-f]{32}$")
+LIMITS = {"public_items": PUBLIC_ITEMS, "lists": MAX_LISTS, "items": MAX_ITEMS, "name": NAME_MAX, "description": DESCRIPTION_MAX, "note": NOTE_MAX, "tags": TAGS_MAX, "tag": TAG_MAX}
 
 
 # ---------------------------------------------------------------- request bodies
@@ -122,6 +127,14 @@ class Empty(BaseModel):
     pass
 
 
+class PublishIn(BaseModel):
+    """Choices made at publish time. Both are off unless the owner ticks them: the public page then shows neither the
+    owner's name nor their notes. Tags are never published."""
+
+    show_owner: bool = False
+    include_notes: bool = False
+
+
 # ---------------------------------------------------------------- storage
 
 
@@ -141,9 +154,15 @@ def saved_list_id(conn, user_id: int) -> int:
 
 
 def _summary(row) -> dict:
+    shared = json.loads(row["share_snapshot"]) if row["share_id"] and row["share_snapshot"] else None
     return {
         "id": row["id"], "name": row["name"], "description": row["description"], "builtin": bool(row["is_builtin"]),
         "count": row["count"], "created_at": row["created_at"], "updated_at": row["updated_at"],
+        # Only the owner ever sees this summary. "stale": the list changed after the public page was last updated.
+        "public": None if shared is None else {
+            "share_id": row["share_id"], "published_at": row["published_at"], "show_owner": shared["show_owner"],
+            "include_notes": shared["include_notes"], "stale": row["updated_at"] > row["published_at"],
+        },
     }
 
 
@@ -300,6 +319,74 @@ def remove_item(list_ref: str, accession: str, _: Empty | None = None, user: Use
     return {"list_id": list_id, "ok": True}
 
 
+# ---------------------------------------------------------------- public lists (F6)
+
+PUBLISHED = "published list "  # audit event prefix; the daily publish limit counts these
+
+
+@router.post("/{list_id}/publish")
+def publish(list_id: int, body: PublishIn, user: User = Depends(users.current_user)) -> dict:
+    """Publishes the list, or updates its public page to what the list holds now (papertok's public lists). The first
+    publish draws a random 32-hex share id from `secrets`; updates keep it, so a shared link keeps working. The public
+    page shows a copy frozen here: name, description, the first 50 items with their snapshots, notes only when
+    include_notes is set, the owner's display name only when show_owner is set, and never tags. At most 60 publishes
+    and updates per account in any 24 hours."""
+    with Db() as conn:
+        conn.execute("BEGIN IMMEDIATE")  # the daily count and the write see no other publish in between
+        row = _own(conn, user.id, list_id)
+        t = users.now()
+        recent = conn.execute("SELECT count(*) FROM audit WHERE user_id = ? AND at > ? AND event LIKE ?",
+                              (user.id, iso(t - timedelta(days=1)), PUBLISHED + "%")).fetchone()[0]
+        if recent >= PUBLISH_PER_DAY:
+            raise ApiError(429, "RATE_LIMITED", f"A day allows {PUBLISH_PER_DAY} publishes and updates. Please try again tomorrow.", transient=True)
+        items = [
+            {"accession": i["accession"], "snapshot": i["snapshot"]} | ({"note": i["note"]} if body.include_notes and i["note"] else {})
+            for i in _items(conn, list_id)
+        ]
+        shared = {
+            "name": row["name"], "description": row["description"], "owner": user.display_name if body.show_owner else None,
+            "show_owner": body.show_owner, "include_notes": body.include_notes, "count": len(items), "items": items[:PUBLIC_ITEMS],
+        }
+        share_id = row["share_id"] or secrets.token_hex(16)
+        conn.execute("UPDATE lists SET share_id = ?, published_at = ?, share_snapshot = ? WHERE id = ?",
+                     (share_id, iso(t), json.dumps(shared), list_id))
+        users.audit(conn, user.id, PUBLISHED + str(list_id))
+        return {"list": _summary(_own(conn, user.id, list_id))}
+
+
+@router.delete("/{list_id}/publish")
+def unpublish(list_id: int, _: Empty | None = None, user: User = Depends(users.current_user)) -> dict:
+    """Withdraws the public page: its link answers 404 from now on. Publishing again draws a new share id."""
+    with Db() as conn:
+        row = _own(conn, user.id, list_id)
+        if row["share_id"]:
+            conn.execute("UPDATE lists SET share_id = NULL, published_at = NULL, share_snapshot = NULL WHERE id = ?", (list_id,))
+            users.audit(conn, user.id, f"stopped sharing list {list_id}")
+        return {"list": _summary(_own(conn, user.id, list_id))}
+
+
+public_router = APIRouter(prefix="/public", tags=["lists"])
+
+
+@public_router.get("/lists/{share_id}")
+def public_list(share_id: str, response: Response) -> dict:
+    """A published list as anyone may see it, signed in or not. There is no route that lists share ids; an id that is
+    not 32 lowercase hex characters, was withdrawn, or never existed answers the same 404."""
+    response.headers["Cache-Control"] = "no-store"  # withdrawing must take effect at once
+    response.headers["X-Robots-Tag"] = "noindex"
+    row = None
+    if SHARE_ID.match(share_id):
+        with Db() as conn:
+            row = conn.execute("SELECT share_snapshot, published_at FROM lists WHERE share_id = ?", (share_id,)).fetchone()
+    if not row or not row["share_snapshot"]:
+        raise ApiError(404, "LIST_NOT_FOUND", "This list is not shared, or its owner stopped sharing it.", headers={"Cache-Control": "no-store", "X-Robots-Tag": "noindex"})
+    shared = json.loads(row["share_snapshot"])
+    return {
+        "name": shared["name"], "description": shared["description"], "owner": shared["owner"], "updated_at": row["published_at"],
+        "count": shared["count"], "shown": len(shared["items"]), "items": shared["items"],
+    }
+
+
 # ---------------------------------------------------------------- bringing a guest's Saved into the account (F3)
 
 
@@ -392,6 +479,8 @@ def export(list_id: int, format: Literal["accessions", "csv"] = Query("accession
 
 def install(app: FastAPI) -> None:
     """Adds the /lists routes; call after users.install(app), which provides the error handlers."""
-    if "/lists" not in users.SHAPED_PREFIXES:
-        users.SHAPED_PREFIXES.append("/lists")
+    for prefix in ("/lists", "/public"):
+        if prefix not in users.SHAPED_PREFIXES:
+            users.SHAPED_PREFIXES.append(prefix)
     app.include_router(router)
+    app.include_router(public_router)

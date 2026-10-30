@@ -20,7 +20,7 @@ an account does, what locus stores for it, and what is not built yet.
 
 Account data lives in its own SQLite file, `OMICS_USERS_DB` (default `data/users.db`, not in git), never in
 `omics.db`. For each account: the display name and creation time; each passkey's public key, counter, transports,
-creation and last-use times; hashed recovery codes; your lists and their items, your watched searches and the people you follow (their ORCID, name and the datasets you marked seen; see below); a linked ORCID iD; sessions (a hash of the cookie token, the
+creation and last-use times; hashed recovery codes; your lists and their items (and the public copy of any list you share), your watched searches and the people you follow (their ORCID, name and the datasets you marked seen; see below); a linked ORCID iD; sessions (a hash of the cookie token, the
 sign-in method, times and the browser's user-agent string); and a short audit trail of sign-ins and changes. locus runs
 no analytics.
 
@@ -72,13 +72,32 @@ no analytics.
   /lists/{id}`, `POST /lists/{id|saved}/items`, `PATCH/DELETE /lists/{id|saved}/items/{accession}`,
   `GET /lists/{id}/export?format=accessions|csv`. Another account's list answers 404, as a missing one does.
 
+## Public lists
+
+- **Share.** On a list's page, "Share a public link" offers two choices, both unticked: show your display name, and
+  include your notes. Publish makes a read-only copy at `/s/<id>`, where `<id>` is 32 random hex characters from
+  Python's `secrets`. Anyone with the link can open it, signed in or not. Tags are never published.
+- **What the public page shows.** The list's name and description, the date it was last published, your display name
+  only if you chose it, and the first 50 datasets with what each page showed when you saved it (title, repository,
+  organism, data type, samples), linked to the dataset pages; notes only if you chose them. The page is not indexed
+  (`robots: noindex`) and sends no referrer.
+- **A frozen copy.** The public page keeps what the list held when you published. After any change the list's page
+  says so ("the public page still shows the earlier version") with "Update public page", which keeps the same link.
+- **Stop sharing** removes the copy at once: the link then answers 404, the same as a link that never existed.
+  Publishing again draws a new link. Deleting the list or the account withdraws it too.
+- **Limits.** 60 publishes and updates an account in any 24 hours (counted on the server); stopping is never limited.
+  No route lists share ids.
+- **API.** `POST /lists/{id}/publish` with `{show_owner, include_notes}` (publish or update) and `DELETE
+  /lists/{id}/publish` (owner only, JSON and `X-Locus-Intent: 1`); `GET /public/lists/{share_id}` needs no session.
+  A list's summary carries `public: {share_id, published_at, show_owner, include_notes, stale}` or null.
+
 ## Watched searches
 
 - **Watch.** Above a search's results, "Watch this search" remembers the question, today's date and the datasets the
   search shows. The home page lists your watched searches under "Watching since". Select the control again to stop
   watching.
 - **New since.** When a watched search runs again, results it had not shown before are marked "new" and counted next to
-  "Watching since". Those datasets then count as seen, so the run after that marks only what arrived after it. Going
+  "Watching since" as "N new since your last run". Those datasets then count as seen, so the run after that marks only what arrived after it. Going
   back to the same results (from a dataset page, say) keeps that run's marks.
 - **Where they live.** Signed in, watches are kept in your account and follow you to every device. Without an
   account they live in this browser (localStorage `locus:watched`, same shape) and can be brought into an account
@@ -139,6 +158,6 @@ no analytics.
 
 ## Not built yet
 
-Public lists, settings (renaming, adding or removing passkeys, new recovery codes, unlinking
+Settings (renaming, adding or removing passkeys, new recovery codes, unlinking
 ORCID, deleting the account) come in later steps. A list cannot be reordered by hand, and the nf-core sample sheet is not offered for a
 whole list yet. Email is not used, so following sends no digest; following institutions or topics, and a person without an ORCID, are not supported.

@@ -8,8 +8,10 @@ import { ACCOUNT_EVENT, AccountError, me } from "@/lib/account";
 // What the page showed when the dataset was saved, so a list renders without asking a repository again.
 export type Snapshot = { title: string; source: string; organism: string; modality: string; samples: number | null };
 export type Item = { accession: string; added_at: string; note: string; tags: string[]; snapshot: Snapshot };
-export type ListSummary = { id: number; name: string; description: string; builtin: boolean; count: number; created_at: string; updated_at: string };
-export type Limits = { lists: number; items: number; name: number; description: number; note: number; tags: number; tag: number };
+// Set while the list is public (F6). stale: the list changed after its public page was last updated.
+export type PublicState = { share_id: string; published_at: string; show_owner: boolean; include_notes: boolean; stale: boolean };
+export type ListSummary = { id: number; name: string; description: string; builtin: boolean; count: number; created_at: string; updated_at: string; public: PublicState | null };
+export type Limits = { public_items?: number; lists: number; items: number; name: number; description: number; note: number; tags: number; tag: number };
 export type ListDetail = { list: ListSummary; items: Item[]; limits: Limits };
 
 export const LIMITS: Limits = { lists: 100, items: 500, name: 120, description: 600, note: 10_000, tags: 12, tag: 40 };
@@ -52,6 +54,9 @@ export const editList = (id: number, patch: { name?: string; description?: strin
 export const deleteList = (id: number) => call<{ ok: boolean }>("DELETE", `/lists/${id}`);
 export const editItem = (ref: Ref, accession: string, patch: { note?: string; tags?: string[] }) =>
   call<{ item: Item }>("PATCH", `/lists/${ref}/items/${encodeURIComponent(accession)}`, patch);
+export const publishList = (id: number, choices: { show_owner: boolean; include_notes: boolean }) => call<{ list: ListSummary }>("POST", `/lists/${id}/publish`, choices);
+export const unpublishList = (id: number) => call<{ list: ListSummary }>("DELETE", `/lists/${id}/publish`);
+export const shareUrl = (shareId: string) => `${window.location.origin}/s/${shareId}`;
 export const exportHref = (id: number, format: "accessions" | "csv") => `${API}/lists/${id}/export?format=${format}`;
 
 // ---------------------------------------------------------------- guest storage
