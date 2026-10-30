@@ -1,20 +1,22 @@
 "use client";
 import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
+import { useSearchParams } from "next/navigation";
 import { ArrowUpRight, Download, KeyRound } from "lucide-react";
 import { Wordmark } from "@/components/logo";
 import { BackToResults } from "@/components/back-to-results";
 import { AuthPrompt } from "@/components/auth-prompt";
-import { RecoveryCodes } from "@/components/account-page";
+import { ORCID_OUTCOME, RecoveryCodes } from "@/components/account-page";
 import { Heading, LINK, MUTED_LINK } from "@/components/page-kit";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { ACCOUNT_EVENT, AccountError, describe, me, orcidStartHref } from "@/lib/account";
 import { listFollows, orcidUrl, unfollow, type Follow } from "@/lib/follows";
 import {
-  PRIVACY_DOC, addPasskey, confirmCode, confirmPasskey, deleteAccount, exportHref, getSettings, regenerateCodes, removePasskey, rename,
+  addPasskey, confirmCode, confirmPasskey, deleteAccount, exportHref, getSettings, regenerateCodes, removePasskey, rename,
   renamePasskey, unlinkOrcid, type Passkey, type Settings,
 } from "@/lib/settings";
+import { PRIVACY_PATH, PRIVACY_SUMMARY } from "@/lib/privacy";
 import { setWatch, useWatches } from "@/lib/watches";
 import { cn } from "@/lib/utils";
 
@@ -25,6 +27,8 @@ const confirmed = (s: Settings) => !!s.confirmed_until && Date.parse(s.confirmed
 const ROW = "flex flex-wrap items-baseline justify-between gap-x-6 gap-y-2 border-b border-rule py-3";
 // Text actions in a row: spaced by gap, so a wrapped line never starts with a stray separator.
 const ACTIONS = "flex flex-wrap items-baseline gap-x-4 gap-y-1 text-[13px]";
+// Confirm's "Add a passkey" asks the Passkeys block to start its ceremony.
+const ADD_PASSKEY_EVENT = "locus:add-passkey";
 
 function Nav() {
   return (
@@ -45,8 +49,10 @@ function Section({ id, title, count, children }: { id: string; title: string; co
 }
 
 // Asks for a passkey or a recovery code, which marks this session as confirmed for five minutes. A dev sign-in or an
-// ORCID sign-in never counts, so the delete and regenerate steps send everyone else here first.
-function Confirm({ why, hasPasskey, onConfirmed }: { why: string; hasPasskey: boolean; onConfirmed: (s: Settings) => void }) {
+// ORCID sign-in never counts, so deleting, new codes and adding or removing a passkey send everyone else here first.
+// An account with neither (one made by ORCID) is told to add a passkey first, with a button that starts it.
+function Confirm({ why, s, onConfirmed }: { why: string; s: Settings; onConfirmed: (s: Settings) => void }) {
+  const hasPasskey = s.passkeys.length > 0;
   const [code, setCode] = useState("");
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
@@ -57,6 +63,15 @@ function Confirm({ why, hasPasskey, onConfirmed }: { why: string; hasPasskey: bo
     setError("");
     work().then(onConfirmed, (e) => setError(describe(e))).finally(() => setBusy(""));
   };
+  if (!hasPasskey && s.user.recovery_codes_left === 0) {
+    return (
+      <div ref={box} tabIndex={-1} role="group" aria-labelledby="confirm-title" className="grid max-w-xl gap-3 border-l-2 border-foreground pl-4 text-[13px] outline-none" data-confirm="add-passkey-first">
+        <p id="confirm-title" className="font-medium">Add a passkey first</p>
+        <p className="text-muted-foreground">{why} This account has no passkey or recovery codes yet, so there is nothing to confirm with. Add a passkey, sign in with it, then come back here.</p>
+        <p><Button onClick={() => window.dispatchEvent(new Event(ADD_PASSKEY_EVENT))} data-confirm-add><KeyRound aria-hidden />Add a passkey</Button></p>
+      </div>
+    );
+  }
   return (
     <div ref={box} tabIndex={-1} role="group" aria-labelledby="confirm-title" className="grid max-w-xl gap-3 border-l-2 border-foreground pl-4 text-[13px] outline-none" data-confirm>
       <p id="confirm-title" className="font-medium">Confirm with your passkey or a recovery code</p>
@@ -107,7 +122,9 @@ function DisplayName({ s, onChange }: { s: Settings; onChange: (s: Settings) => 
   );
 }
 
-function PasskeyRow({ p, only, onChange }: { p: Passkey; only: boolean; onChange: (s: Settings) => void }) {
+function PasskeyRow({ p, only, confirmedNow, onChange, onRemoved, onConfirm }: {
+  p: Passkey; only: boolean; confirmedNow: boolean; onChange: (s: Settings) => void; onRemoved: (s: Settings) => void; onConfirm: () => void;
+}) {
   const [editing, setEditing] = useState(false);
   const [nickname, setNickname] = useState(p.nickname);
   const [busy, setBusy] = useState(false);
@@ -126,7 +143,7 @@ function PasskeyRow({ p, only, onChange }: { p: Passkey; only: boolean; onChange
   };
   const label = p.nickname || "Passkey";
   return (
-    <li className={ROW} data-passkey={p.nickname || p.id}>
+    <li className={ROW} data-passkey={p.nickname || p.id} data-passkey-row>
       {editing ? (
         <form className="flex flex-wrap items-center gap-3" onSubmit={(e) => { e.preventDefault(); act(() => renamePasskey(p.id, nickname.trim())); }}>
           <label htmlFor={`nick-${p.id}`} className="sr-only">Name for this passkey</label>
@@ -146,7 +163,15 @@ function PasskeyRow({ p, only, onChange }: { p: Passkey; only: boolean; onChange
           {only ? (
             <span className="text-muted-foreground">Your only passkey stays</span>
           ) : (
-            <button type="button" disabled={busy} className={MUTED_LINK} onClick={() => act(() => removePasskey(p.id))} aria-label={`Remove ${label}`}>Remove</button>
+            <button type="button" disabled={busy} className={MUTED_LINK} onClick={() => {
+              if (!confirmedNow) { onConfirm(); return; }
+              setBusy(true);
+              setError("");
+              removePasskey(p.id).then(onRemoved, (e) => {
+                if (e instanceof AccountError && e.code === "CONFIRM_REQUIRED") onConfirm();
+                else setError(describe(e));
+              }).finally(() => setBusy(false));
+            }} aria-label={`Remove ${label}`} data-remove>Remove</button>
           )}
         </span>
       )}
@@ -159,27 +184,70 @@ function Passkeys({ s, onChange }: { s: Settings; onChange: (s: Settings) => voi
   const [nickname, setNickname] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  const add = (e: React.FormEvent) => {
-    e.preventDefault();
+  const [asking, setAsking] = useState(false);
+  const [needOrcid, setNeedOrcid] = useState(false);
+  const list = useRef<HTMLDivElement>(null);
+  const field = useRef<HTMLInputElement>(null);
+  const addButton = useRef<HTMLButtonElement>(null);
+  const none = s.passkeys.length === 0;
+  // Adding a passkey needs a fresh confirmation, except an account's first one soon after an ORCID sign-in.
+  const start = useCallback(() => {
+    if (!none && !confirmed(s)) { setAsking(true); return; }
     setBusy(true);
     setError("");
-    addPasskey(nickname.trim()).then((next) => { onChange(next); setNickname(""); }, (err) => setError(describe(err))).finally(() => setBusy(false));
-  };
+    setNeedOrcid(false);
+    addPasskey(field.current?.value.trim() ?? "").then((next) => { onChange(next); setNickname(""); setAsking(false); }, (err) => {
+      if (err instanceof AccountError && err.code === "CONFIRM_REQUIRED" && !none) setAsking(true);
+      else if (err instanceof AccountError && err.code === "ORCID_SIGN_IN_REQUIRED") setNeedOrcid(true);
+      else setError(describe(err));
+    }).finally(() => setBusy(false));
+  }, [none, onChange, s]);
+  useEffect(() => {
+    const go = () => { field.current?.scrollIntoView({ block: "center" }); field.current?.focus(); start(); };
+    window.addEventListener(ADD_PASSKEY_EVENT, go);
+    return () => window.removeEventListener(ADD_PASSKEY_EVENT, go);
+  }, [start]);
+  const add = (e: React.FormEvent) => { e.preventDefault(); start(); };
+  // After a removal, focus moves to the next passkey's Rename (or the last one's), never to the page body. It runs once
+  // the list without the removed row has rendered.
+  const focusRow = useRef<number | null>(null);
+  useEffect(() => {
+    if (focusRow.current === null) return;
+    const rows = list.current?.querySelectorAll<HTMLElement>("[data-passkey-row]") ?? [];
+    const row = rows[Math.min(focusRow.current, rows.length - 1)];
+    focusRow.current = null;
+    (row?.querySelector<HTMLButtonElement>("button") ?? field.current)?.focus();
+  }, [s.passkeys]);
+  const removed = (index: number) => (next: Settings) => { focusRow.current = index; onChange(next); };
   return (
-    <div className="grid gap-3" data-settings-passkeys={s.passkeys.length}>
+    <div ref={list} className="grid gap-3" data-settings-passkeys={s.passkeys.length}>
       <h3 className="label text-muted-foreground">Passkeys</h3>
-      {s.passkeys.length === 0 ? (
+      {none ? (
         <p className="text-[13px] text-muted-foreground">This account has no passkey yet. It signs in another way (a test sign-in or ORCID).</p>
       ) : (
         <ul className="grid border-t border-rule">
-          {s.passkeys.map((p) => <PasskeyRow key={p.id} p={p} only={s.passkeys.length === 1} onChange={onChange} />)}
+          {s.passkeys.map((p, i) => (
+            <PasskeyRow key={p.id} p={p} only={s.passkeys.length === 1} confirmedNow={confirmed(s)} onChange={onChange} onRemoved={removed(i)} onConfirm={() => setAsking(true)} />
+          ))}
         </ul>
       )}
       <form className="flex flex-wrap items-center gap-3" onSubmit={add}>
         <label htmlFor="new-passkey" className="sr-only">Name for the new passkey</label>
-        <Input id="new-passkey" value={nickname} onChange={(e) => setNickname(e.target.value)} maxLength={80} placeholder="Name it, e.g. work laptop" className="h-9 max-w-xs bg-card" />
-        <Button type="submit" variant="outline" disabled={busy}><KeyRound aria-hidden />{busy ? "Waiting for your passkey…" : "Add another passkey"}</Button>
+        <Input ref={field} id="new-passkey" value={nickname} onChange={(e) => setNickname(e.target.value)} maxLength={80} placeholder="Name it, e.g. work laptop" className="h-9 max-w-xs bg-card" />
+        <Button ref={addButton} type="submit" variant="outline" disabled={busy} data-add-passkey>
+          <KeyRound aria-hidden />{busy ? "Waiting for your passkey…" : none ? "Add a passkey" : "Add another passkey"}
+        </Button>
       </form>
+      {needOrcid && (
+        <p role="alert" className="max-w-xl text-[13px]" data-need-orcid>
+          An account&apos;s first passkey can be added within five minutes of signing in with ORCID.{" "}
+          <a href={orcidStartHref("/settings")} className={LINK}>Sign in with ORCID again</a>, then add it.
+        </p>
+      )}
+      {asking && (
+        <Confirm why="Adding or removing a passkey changes how this account is signed in to." s={s}
+          onConfirmed={(next) => { onChange(next); setAsking(false); setTimeout(() => addButton.current?.focus()); }} />
+      )}
       {error && <p role="alert" className="text-[13px] text-destructive">{error}</p>}
     </div>
   );
@@ -211,10 +279,10 @@ function Recovery({ s, onChange }: { s: Settings; onChange: (s: Settings) => voi
         <button ref={button} type="button" disabled={busy} onClick={regenerate} className={MUTED_LINK} data-regenerate>
           {busy ? "Making new codes…" : "Make ten new codes"}
         </button>
-        <span className="text-muted-foreground"> The old ones stop working, and the new ones are shown once.</span>
       </p>
+      <p className="text-[12.5px] text-muted-foreground">The old ones stop working, and the new ones are shown once.</p>
       {asking && (
-        <Confirm why="New recovery codes replace the ones you have." hasPasskey={s.passkeys.length > 0}
+        <Confirm why="New recovery codes replace the ones you have." s={s}
           onConfirmed={(next) => { onChange(next); setAsking(false); setTimeout(() => button.current?.focus()); }} />
       )}
       {error && <p role="alert" className="text-[13px] text-destructive">{error}</p>}
@@ -225,6 +293,9 @@ function Recovery({ s, onChange }: { s: Settings; onChange: (s: Settings) => voi
 function Orcid({ s, onChange }: { s: Settings; onChange: (s: Settings) => void }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [asking, setAsking] = useState(false);
+  const outcome = ORCID_OUTCOME[useSearchParams().get("orcid") ?? ""] ?? "";
+  const unlink = useRef<HTMLButtonElement>(null);
   const orcid = s.user.orcid;
   return (
     <div className="grid gap-2" data-settings-orcid={orcid ?? "none"}>
@@ -232,16 +303,25 @@ function Orcid({ s, onChange }: { s: Settings; onChange: (s: Settings) => void }
       {orcid ? (
         <p className={ACTIONS}>
           <span>Linked to <a href={orcidUrl(orcid)} className={cn("font-mono", LINK)}>{orcid}</a></span>
-          <button type="button" disabled={busy} className={MUTED_LINK} onClick={() => {
+          <button ref={unlink} type="button" disabled={busy} className={MUTED_LINK} onClick={() => {
+            if (s.passkeys.length > 0 && !confirmed(s)) { setAsking(true); return; }
             setBusy(true);
             setError("");
-            unlinkOrcid().then(onChange, (e) => setError(describe(e))).finally(() => setBusy(false));
+            unlinkOrcid().then((next) => { onChange(next); setAsking(false); }, (e) => {
+              if (e instanceof AccountError && e.code === "CONFIRM_REQUIRED") setAsking(true);
+              else setError(describe(e));
+            }).finally(() => setBusy(false));
           }}>{busy ? "Unlinking…" : "Unlink"}</button>
         </p>
       ) : s.orcid_available ? (
         <p className="text-[13px]"><a href={orcidStartHref("/settings")} className={cn("inline-flex items-center gap-1", MUTED_LINK)}>Link your ORCID iD<ArrowUpRight aria-hidden className="size-3.5" /></a></p>
       ) : (
         <p className="text-[13px] text-muted-foreground">Not linked. ORCID sign-in is not switched on for this server yet.</p>
+      )}
+      {outcome && <p role="status" className="text-[13px] text-muted-foreground">{outcome}</p>}
+      {asking && (
+        <Confirm why="Unlinking ORCID changes how this account is signed in to." s={s}
+          onConfirmed={(next) => { onChange(next); setAsking(false); setTimeout(() => unlink.current?.focus()); }} />
       )}
       {error && <p role="alert" className="text-[13px] text-destructive">{error}</p>}
     </div>
@@ -339,11 +419,11 @@ function DeleteAccount({ s, onChange, onDeleted }: { s: Settings; onChange: (s: 
       ) : (
         <div className="grid gap-4" data-delete-open>
           <div className="flex flex-wrap items-center gap-3">
-            <Button ref={final} variant="destructive" disabled={busy} onClick={remove} data-delete-confirm>{busy ? "Deleting…" : "Delete my account and everything in it"}</Button>
+            <Button ref={final} disabled={busy} onClick={remove} data-delete-confirm>{busy ? "Deleting…" : "Delete my account and everything in it"}</Button>
             <Button variant="outline" disabled={busy} onClick={() => { moved.current = true; setAsking(false); setOpen(false); }}>Keep my account</Button>
           </div>
           {asking && (
-            <Confirm why="Deleting an account needs a fresh check that it is you." hasPasskey={s.passkeys.length > 0}
+            <Confirm why="Deleting an account needs a fresh check that it is you." s={s}
               onConfirmed={(next) => { onChange(next); setAsking(false); setTimeout(() => final.current?.focus()); }} />
           )}
           {confirmed(s) && !asking && s.confirmed_until && <p role="status" className="text-[13px] text-muted-foreground">Confirmed. You can delete until {s.confirmed_until.slice(11, 16)} UTC.</p>}
@@ -407,10 +487,8 @@ export function SettingsPage() {
             <Following />
           </Section>
           <Section id="privacy" title="Privacy">
-            <p className="max-w-xl text-[14px] leading-relaxed">
-              For an account, locus keeps your display name, the public half of each passkey, scrambled copies of your recovery codes and sign-in tokens, your ORCID iD if you link one, your lists with their notes and tags, your watched searches, the people you follow, and a short log of account events such as sign-ins. It runs no analytics and sets one cookie, the one that keeps you signed in.{" "}
-              <a href={PRIVACY_DOC} className={cn("inline-flex items-center gap-1", MUTED_LINK)}>How accounts work<ArrowUpRight aria-hidden className="size-3.5" /></a>
-            </p>
+            <p className="max-w-xl text-[14px] leading-relaxed">{PRIVACY_SUMMARY}</p>
+            <p className="text-[13px]"><Link href={PRIVACY_PATH} className={MUTED_LINK} data-privacy-link>How accounts work</Link></p>
           </Section>
           <Section id="data" title="Your data">
             <p className="max-w-xl text-[14px] text-muted-foreground">One JSON file with everything above: your lists and items, notes and tags, watched searches, follows, passkey names, sign-in history and the account log. It leaves out secrets such as passkey keys and code hashes.</p>

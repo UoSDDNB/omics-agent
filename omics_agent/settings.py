@@ -3,8 +3,13 @@
 - Display name; passkeys (list, rename, add another with a registration ceremony, remove but never the last one);
   recovery codes (how many are left, regenerate); ORCID (unlink).
 - Confirming it is you: a passkey or recovery-code check that marks the current session (sessions.strong_at). Deleting
-  the account and regenerating recovery codes need one within the last five minutes. A dev sign-in or ORCID sign-in
-  never counts, and nothing outside these routes and a real passkey or recovery-code sign-in sets strong_at.
+  the account, regenerating recovery codes, adding a passkey, removing a passkey and unlinking ORCID need one within the
+  last five minutes. A dev sign-in or ORCID sign-in never counts, and nothing outside these routes and a real passkey or
+  recovery-code sign-in sets strong_at.
+- A passkey added from /settings cannot confirm the session that added it (credentials.added_in_session). A stolen
+  session cookie therefore cannot add its own key and confirm with it; the new key confirms from its next sign-in on.
+- The one exception to "adding a passkey needs a confirmation": an account with no passkey (one made by ORCID) may add
+  its first passkey within five minutes of an ORCID sign-in on this session, since it has nothing else to confirm with.
 - Download everything as JSON: every row the users DB holds about the account, without secrets (no session token
   hashes, no recovery code hashes, no passkey public keys, no WebAuthn user handle).
 - Delete the account: every row in one transaction, then the cookie is cleared. One audit row stays: the time and
@@ -14,6 +19,7 @@ Sessions, the CSRF guard, rate limits and the error shape come from users.py; th
 """
 
 import json
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, FastAPI, Response
 from pydantic import BaseModel, Field
@@ -28,6 +34,7 @@ from .users import ApiError, Db, User, auth_rate_limit, iso, now
 
 router = APIRouter(prefix="/account", tags=["settings"], dependencies=[Depends(users.require_intent)])
 NICKNAME_MAX = 80
+TOO_NEW = "A passkey added in this session cannot confirm it. Sign out, sign in with that passkey, then confirm."
 
 
 class Empty(BaseModel):
@@ -87,6 +94,32 @@ def edit_profile(body: ProfileIn, user: User = Depends(users.current_user)) -> d
 # ---------------------------------------------------------------- passkeys
 
 
+def _held(conn, user_id: int) -> int:
+    return conn.execute("SELECT count(*) FROM credentials WHERE user_id = ?", (user_id,)).fetchone()[0]
+
+
+def _fresh_orcid(user: User) -> bool:
+    """Whether this session was made by an ORCID sign-in within the confirmation window."""
+    if user.session_method != "orcid":
+        return False
+    started = datetime.strptime(user.session_created_at, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    return users.now() < started + users.STRONG_WINDOW
+
+
+def _may_add_passkey(conn, user: User) -> None:
+    """Adding a passkey needs a confirmation within five minutes, except an account's first passkey within five minutes
+    of an ORCID sign-in on this session (F7-r1-1)."""
+    if user.strong_until() is not None:
+        return
+    if _held(conn, user.id) == 0:
+        if _fresh_orcid(user):
+            return
+        if conn.execute("SELECT 1 FROM orcid_links WHERE user_id = ?", (user.id,)).fetchone() and not conn.execute(
+                "SELECT 1 FROM recovery_codes WHERE user_id = ? AND used_at IS NULL", (user.id,)).fetchone():
+            raise ApiError(403, "ORCID_SIGN_IN_REQUIRED", "Sign in with ORCID again, then add your first passkey within five minutes.")
+    users.require_strong(user)
+
+
 def _own_passkey(conn, user_id: int, credential_id: str):
     row = conn.execute("SELECT credential_id FROM credentials WHERE credential_id = ? AND user_id = ?", (credential_id, user_id)).fetchone()
     if not row:
@@ -104,7 +137,9 @@ def rename_passkey(credential_id: str, body: NicknameIn, user: User = Depends(us
 
 @router.delete("/passkeys/{credential_id}")
 def remove_passkey(credential_id: str, _: Empty | None = None, user: User = Depends(users.current_user)) -> dict:
-    """Removes a passkey; the account's last one stays, so the account can always be signed in to."""
+    """Removes a passkey; the account's last one stays, so the account can always be signed in to. Needs a confirmation
+    within five minutes."""
+    users.require_strong(user)
     with Db() as conn:
         conn.execute("BEGIN IMMEDIATE")  # the count and the delete see no other removal in between
         _own_passkey(conn, user.id, credential_id)
@@ -118,8 +153,10 @@ def remove_passkey(credential_id: str, _: Empty | None = None, user: User = Depe
 @router.post("/passkeys/options", dependencies=[Depends(auth_rate_limit)])
 def add_passkey_options(_: Empty | None = None, user: User = Depends(users.current_user)) -> dict:
     """Starts adding another passkey to the signed-in account (the same ceremony as creating an account). The browser
-    is told which passkeys the account already has, so it does not make a second one on the same device."""
+    is told which passkeys the account already has, so it does not make a second one on the same device. Needs a
+    confirmation within five minutes (or, for an account's first passkey, a fresh ORCID sign-in)."""
     with Db() as conn:
+        _may_add_passkey(conn, user)
         handle = conn.execute("SELECT user_handle FROM users WHERE id = ?", (user.id,)).fetchone()["user_handle"]
         held = [PublicKeyCredentialDescriptor(id=base64url_to_bytes(p["id"])) for p in _passkeys(conn, user.id)]
         options = generate_registration_options(
@@ -151,7 +188,11 @@ def add_passkey_verify(body: CredentialIn, user: User = Depends(users.current_us
         raise account._passkey_rejected("registration", error)
     transports = (body.credential.get("response") or {}).get("transports") or []
     with Db() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        _may_add_passkey(conn, user)  # again: the window may have closed, or a first passkey arrived meanwhile
         account.add_credential(conn, user.id, verified, transports, " ".join(body.nickname.split()))
+        conn.execute("UPDATE credentials SET added_in_session = ? WHERE credential_id = ?",
+                     (user.token_sha256, account.bytes_to_base64url(verified.credential_id)))
         return _state(conn, user)
 
 
@@ -160,10 +201,14 @@ def add_passkey_verify(body: CredentialIn, user: User = Depends(users.current_us
 
 @router.post("/confirm/options", dependencies=[Depends(auth_rate_limit)])
 def confirm_options(_: Empty | None = None, user: User = Depends(users.current_user)) -> dict:
-    """Starts a passkey check for the signed-in account; the browser may offer only this account's passkeys."""
+    """Starts a passkey check for the signed-in account; the browser may offer only this account's passkeys, and not one
+    added in this session."""
     with Db() as conn:
-        held = [PublicKeyCredentialDescriptor(id=base64url_to_bytes(p["id"])) for p in _passkeys(conn, user.id)]
+        held = [PublicKeyCredentialDescriptor(id=base64url_to_bytes(r["credential_id"])) for r in conn.execute(
+            "SELECT credential_id FROM credentials WHERE user_id = ? AND added_in_session IS NOT ? ORDER BY created_at, rowid", (user.id, user.token_sha256))]
         if not held:
+            if _held(conn, user.id):
+                raise ApiError(409, "PASSKEY_TOO_NEW", TOO_NEW)
             raise ApiError(409, "NO_PASSKEY", "This account has no passkey. Confirm with a recovery code, or add a passkey first.")
         options = generate_authentication_options(rp_id=account.rp_id(), user_verification=UserVerificationRequirement.REQUIRED, allow_credentials=held)
         cid = account._put_challenge(conn, "confirm", options.challenge, user.id)
@@ -177,11 +222,13 @@ def confirm_verify(body: CredentialIn, user: User = Depends(users.current_user))
     with Db() as conn:
         row = account._take_challenge(conn, body.challenge_id, "confirm")
         credential_id = str(body.credential.get("id") or body.credential.get("rawId") or "")
-        stored = conn.execute("SELECT public_key, sign_count FROM credentials WHERE credential_id = ? AND user_id = ?", (credential_id, user.id)).fetchone()
+        stored = conn.execute("SELECT public_key, sign_count, added_in_session FROM credentials WHERE credential_id = ? AND user_id = ?", (credential_id, user.id)).fetchone()
     if row["user_id"] != user.id:
         raise ApiError(400, "CHALLENGE_EXPIRED", "This sign-in attempt has expired. Please start again.")
     if not stored:
         raise ApiError(400, "PASSKEY_UNKNOWN", "This passkey does not belong to the account you are signed in to.")
+    if stored["added_in_session"] == user.token_sha256:
+        raise ApiError(400, "PASSKEY_TOO_NEW", TOO_NEW)
     try:
         verified = account.verify_authentication_response(
             credential=body.credential, expected_challenge=base64url_to_bytes(row["challenge"]), expected_rp_id=account.rp_id(),
@@ -224,12 +271,14 @@ def regenerate_codes(_: Empty | None = None, user: User = Depends(users.current_
 
 @router.delete("/orcid")
 def unlink_orcid(_: Empty | None = None, user: User = Depends(users.current_user)) -> dict:
-    """Unlinks the ORCID iD. Refused when the account has no passkey, since ORCID is then its only way in."""
+    """Unlinks the ORCID iD. Refused when the account has no passkey, since ORCID is then its only way in. Needs a
+    confirmation within five minutes, like every change to how the account is signed in to."""
     with Db() as conn:
         if not conn.execute("SELECT 1 FROM orcid_links WHERE user_id = ?", (user.id,)).fetchone():
             raise ApiError(404, "ORCID_NOT_LINKED", "No ORCID iD is linked to this account.")
         if not conn.execute("SELECT 1 FROM credentials WHERE user_id = ?", (user.id,)).fetchone():
             raise ApiError(409, "ORCID_ONLY_SIGN_IN", "ORCID is the only way into this account. Add a passkey before you unlink it.")
+        users.require_strong(user)
         conn.execute("DELETE FROM orcid_links WHERE user_id = ?", (user.id,))
         users.audit(conn, user.id, "orcid unlinked")
         return _state(conn, user)

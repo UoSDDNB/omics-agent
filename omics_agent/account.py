@@ -299,6 +299,11 @@ def orcid_callback(request: Request, state: str = "", code: str = "", error: str
         signed_in = users.optional_user(request, Response())
         if signed_in is None or signed_in.id != row["user_id"]:
             return _orcid_back(to, "failed")
+        with Db() as conn:
+            has_passkey = conn.execute("SELECT 1 FROM credentials WHERE user_id = ?", (signed_in.id,)).fetchone()
+        if has_passkey and signed_in.strong_until() is None:
+            # Linking adds a way into the account, so it needs the same fresh confirmation as adding a passkey (F7-r1-1).
+            return _orcid_back(to, "confirm-first")
     try:
         with orcid_client() as client:
             answer = client.post(f"{orcid_base()}/oauth/token", headers={"Accept": "application/json"}, data={
@@ -318,6 +323,15 @@ def orcid_callback(request: Request, state: str = "", code: str = "", error: str
         if row["user_id"] is not None:
             if linked and linked["user_id"] != row["user_id"]:
                 return _orcid_back(to, "in-use")
+            if linked and not has_passkey:
+                # The account's own iD again, on an account with no passkey: a fresh ORCID sign-in, which lets it add
+                # its first passkey within five minutes (settings.py).
+                response = _orcid_back(to, "signed-in")
+                users.start_session(conn, response, row["user_id"], "orcid", request.headers.get("user-agent", ""), request.cookies.get(users.COOKIE))
+                return response
+            if not linked and not has_passkey and conn.execute("SELECT 1 FROM orcid_links WHERE user_id = ?", (row["user_id"],)).fetchone():
+                # An account whose only way in is its ORCID iD never swaps it for another one: that would hand it over.
+                return _orcid_back(to, "already-linked")
             if not linked:
                 conn.execute("DELETE FROM orcid_links WHERE user_id = ?", (row["user_id"],))
                 conn.execute("INSERT INTO orcid_links (user_id, orcid, linked_at) VALUES (?, ?, ?)", (row["user_id"], orcid, iso(now())))

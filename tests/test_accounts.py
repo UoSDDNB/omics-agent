@@ -531,3 +531,27 @@ def test_migrations_are_numbered_and_applied_once(env):
         assert {"users", "credentials", "sessions", "recovery_codes", "orcid_links", "audit", "challenges"} <= tables
     finally:
         conn.close()
+
+
+def test_linking_orcid_is_a_way_in_so_it_needs_a_fresh_confirmation(env, orcid, monkeypatch):
+    # A passkey account whose confirmation has expired cannot link an iD with only its session cookie (F7-r1-1).
+    c = client()
+    register(c, monkeypatch, [])
+    start = users.now()
+    monkeypatch.setattr(users, "now", lambda: start + timedelta(minutes=6))
+    assert orcid_round_trip(c, "/settings").headers["location"] == "/settings?orcid=confirm-first"
+    assert c.get("/account/me").json()["user"]["orcid"] is None
+    monkeypatch.setattr(users, "now", lambda: start)
+    assert orcid_round_trip(c, "/settings").headers["location"] == "/settings?orcid=linked"
+    # An account made by ORCID never swaps its iD, its only way in, for another one.
+    users.AUTH_LIMIT.reset()
+    made = client()
+    orcid.answers["orcid"] = "0000-0001-5109-3700"
+    orcid_round_trip(made)
+    orcid.answers["orcid"] = "0000-0003-1164-7224"
+    assert orcid_round_trip(made, "/settings").headers["location"] == "/settings?orcid=already-linked"
+    assert made.get("/account/me").json()["user"]["orcid"] == "0000-0001-5109-3700"
+    # Its own iD again while signed in is a fresh ORCID sign-in, which may add the account's first passkey.
+    orcid.answers["orcid"] = "0000-0001-5109-3700"
+    assert orcid_round_trip(made, "/settings").headers["location"] == "/settings?orcid=signed-in"
+    assert rows(env, "SELECT method FROM sessions WHERE user_id = (SELECT user_id FROM orcid_links WHERE orcid = ?)", "0000-0001-5109-3700") == [("orcid",)]

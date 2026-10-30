@@ -13,10 +13,12 @@ import {
 } from "@/lib/account";
 import { cn } from "@/lib/utils";
 
-const ORCID_OUTCOME: Record<string, string> = {
+export const ORCID_OUTCOME: Record<string, string> = {
   linked: "Your ORCID iD is now linked to this account.",
   "signed-in": "You are signed in with ORCID.",
   "in-use": "That ORCID iD is already linked to another locus account.",
+  "confirm-first": "Linking ORCID needs a fresh check that it is you. Confirm in Settings, then link it within five minutes.",
+  "already-linked": "This account already has an ORCID iD, and it is the account's only way in, so it stays.",
   cancelled: "ORCID sign-in was cancelled.",
   expired: "That ORCID sign-in took too long. Please start again.",
   failed: "ORCID did not confirm the sign-in. Please try again.",

@@ -22,7 +22,8 @@ Account data lives in its own SQLite file, `OMICS_USERS_DB` (default `data/users
 `omics.db`. For each account: the display name and creation time; each passkey's public key, counter, transports,
 creation and last-use times; hashed recovery codes; your lists and their items (and the public copy of any list you share), your watched searches and the people you follow (their ORCID, name and the datasets you marked seen; see below); a linked ORCID iD; sessions (a hash of the cookie token, the
 sign-in method, times and the browser's user-agent string); and a short audit trail of sign-ins and changes. locus runs
-no analytics.
+no analytics. The wording users read lives in one place, `web/lib/privacy.ts`, which the in-app `/privacy` page and the
+Privacy section of `/settings` render; change it together with this section when the users DB changes.
 
 ## Security, for whoever runs the server
 
@@ -202,7 +203,9 @@ no analytics.
   shows the linked iD with Unlink (refused when ORCID is the account's only way in, i.e. no passkey), or a link button
   when ORCID is configured.
 - **Following.** The people you follow and your watched searches, each with Unfollow or Stop watching.
-- **Privacy.** One paragraph on what locus keeps for an account (above) and that it runs no analytics.
+- **Privacy.** One paragraph on what locus keeps for an account, its two cookies (the session one and the five-minute
+  ORCID nonce) and that it runs no analytics, with "How accounts work" linking to `/privacy`, a static page in the app
+  built from `web/lib/privacy.ts`. It works without anything being pushed or published.
 - **Your data.** "Download everything as JSON" (`GET /account/export`) returns every row the users DB holds about the
   account: name, passkey names and dates, sessions (method, times, browser), how many recovery codes are left and when
   codes were used, the ORCID link, lists with items, notes, tags and the public copy, watched searches, follows and the
@@ -213,18 +216,27 @@ no analytics.
   once), watched searches, follows and the account's activity log. The browser's cookie is then cleared. What stays:
   one activity row with the time and "account deleted", with no user id, name or anything else that points at the
   person, so whoever runs the server can count deletions. Server logs outside the users DB are not touched.
-- **Confirming it is you.** Deleting the account and making new recovery codes need a passkey or recovery-code check
-  within the last five minutes. Signing in with a passkey or a recovery code counts; so does "Confirm with a passkey"
+- **Confirming it is you.** Deleting the account, making new recovery codes, adding a passkey, removing a passkey,
+  unlinking ORCID and linking ORCID to an account that has a passkey need a passkey or recovery-code check within the
+  last five minutes. Signing in with a passkey or a recovery code counts; so does "Confirm with a passkey"
   or "Confirm with a recovery code" on the page (`POST /account/confirm/options` + `/confirm/verify`, or
   `/confirm/recovery`), which accepts only the signed-in account's own passkeys and codes and records the time on the
-  session (`sessions.strong_at`). A recovery code used to confirm is spent. ORCID and the test sign-in never count, so
-  an account made by ORCID alone adds a passkey first. There is no other way to set it.
+  session (`sessions.strong_at`). A recovery code used to confirm is spent. ORCID and the test sign-in never count.
+  There is no other way to set it.
+- **A new passkey cannot confirm the session that added it.** A passkey added from Settings records the session that
+  added it (`credentials.added_in_session`); the confirm routes neither offer nor accept it in that session. It confirms
+  from its own next sign-in on. Without this rule a stolen session cookie could add its own passkey, confirm with it and
+  then remove the owner's passkeys, replace the recovery codes or delete the account.
+- **An account made by ORCID.** It has no passkey and no recovery codes, so it has nothing to confirm with. Its one
+  exception: it may add its first passkey within five minutes of an ORCID sign-in on this session (signing in with
+  ORCID again while signed in, with the same iD, counts). Confirm says so and offers "Add a passkey". To delete such an
+  account: add a passkey, sign in with it, then delete. Its linked iD can never be swapped for another one, since that
+  would hand the account to whoever owns the other iD.
 - **API.** `GET /account/settings`, `PATCH /account/profile`, `PATCH|DELETE /account/passkeys/{id}`,
   `POST /account/passkeys/options|verify`, `POST /account/recovery-codes`, `DELETE /account/orcid`,
   `GET /account/export`, `DELETE /account`; all JSON with `X-Locus-Intent: 1` for changes.
 
 ## Not built yet
 
-Settings (renaming, adding or removing passkeys, new recovery codes, unlinking
-ORCID, deleting the account) come in later steps. A list cannot be reordered by hand, and the nf-core sample sheet is not offered for a
+A list cannot be reordered by hand, and the nf-core sample sheet is not offered for a
 whole list yet. Email is not used, so following sends no digest; following institutions or topics, and a person without an ORCID, are not supported.

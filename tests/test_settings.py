@@ -78,13 +78,19 @@ def register(monkeypatch, name="Grace", credential_id=b"cred-1") -> tuple[TestCl
 def add_passkey(c, monkeypatch, credential_id: bytes, nickname=""):
     monkeypatch.setattr(account, "verify_registration_response",
                         lambda **kw: SimpleNamespace(credential_id=credential_id, credential_public_key=b"public-key-" + credential_id, sign_count=0))
-    opts = call(c, "POST", "/account/passkeys/options").json()
+    started = call(c, "POST", "/account/passkeys/options")
+    opts = started.json()
+    if started.status_code != 200:
+        return opts, started
     return opts, call(c, "POST", "/account/passkeys/verify", {"challenge_id": opts["challenge_id"], "credential": {"id": "y"}, "nickname": nickname})
 
 
 def confirm_with_passkey(c, monkeypatch, credential_id: bytes = b"cred-1"):
     monkeypatch.setattr(account, "verify_authentication_response", lambda **kw: SimpleNamespace(new_sign_count=3))
-    opts = call(c, "POST", "/account/confirm/options").json()
+    started = call(c, "POST", "/account/confirm/options")
+    opts = started.json()
+    if started.status_code != 200:
+        return opts, started
     return opts, call(c, "POST", "/account/confirm/verify", {"challenge_id": opts["challenge_id"], "credential": {"id": account.bytes_to_base64url(credential_id)}})
 
 
@@ -148,7 +154,8 @@ def test_add_rename_and_remove_passkeys_but_never_the_last(env, monkeypatch):
     # Another account's passkey looks like a missing one.
     other = dev("Other")
     assert call(other, "PATCH", f"/account/passkeys/{first}", {"nickname": "mine"}).status_code == 404
-    assert call(other, "DELETE", f"/account/passkeys/{first}").status_code == 404
+    assert call(other, "DELETE", f"/account/passkeys/{first}").status_code == 403  # a dev sign-in never removes one
+    assert rows("SELECT count(*) FROM credentials") == [(1,)]
 
 
 def test_add_passkey_challenge_belongs_to_the_account_that_asked(env, monkeypatch):
@@ -331,3 +338,106 @@ def test_deleting_needs_a_fresh_confirmation(env, monkeypatch):
     assert call(c, "DELETE", "/account").status_code == 200
     assert rows("SELECT count(*) FROM users") == [(0,)]
     assert json.loads(json.dumps(rows("SELECT event FROM audit"))) == [["account deleted"]]
+
+
+# ---------------------------------------------------------------- F7-r1-1: a session cookie alone cannot step up
+
+
+def orcid_only(fresh_minutes_ago: float, orcid: str = "0000-0002-1825-0097") -> TestClient:
+    """An account made by ORCID (no passkey, no recovery codes) whose ORCID session began some minutes ago."""
+    c = dev("ORCID made")
+    uid = rows("SELECT max(id) FROM users")[0][0]
+    started = users.iso(users.now() - timedelta(minutes=fresh_minutes_ago))
+    conn = users.connect()
+    conn.execute("INSERT INTO orcid_links VALUES (?, ?, '2026-10-30T00:00:00Z')", (uid, orcid))
+    conn.execute("UPDATE sessions SET method = 'orcid', created_at = ? WHERE user_id = ?", (started, uid))
+    conn.commit()
+    conn.close()
+    return c
+
+
+def test_the_reviewers_takeover_chain_is_refused_at_every_step(env, monkeypatch):
+    victim, codes = register(monkeypatch, "Victim", b"victim-key")
+    start = users.now()
+    monkeypatch.setattr(users, "now", lambda: start + timedelta(minutes=6))  # the cookie holder's confirmation expired
+    assert call(victim, "DELETE", "/account").json()["error"]["code"] == "CONFIRM_REQUIRED"
+    # 1. Add an attacker passkey: refused at the options step, and at the verify step for options fetched in time.
+    _, r = add_passkey(victim, monkeypatch, b"attacker-key")
+    assert r.status_code == 403 and r.json()["error"]["code"] == "CONFIRM_REQUIRED"
+    monkeypatch.setattr(users, "now", lambda: start + timedelta(minutes=4))
+    early = call(victim, "POST", "/account/passkeys/options").json()
+    monkeypatch.setattr(users, "now", lambda: start + timedelta(minutes=6))
+    r = call(victim, "POST", "/account/passkeys/verify", {"challenge_id": early["challenge_id"], "credential": {"id": "y"}})
+    assert r.status_code == 403 and r.json()["error"]["code"] == "CONFIRM_REQUIRED"
+    assert rows("SELECT credential_id FROM credentials") == [(account.bytes_to_base64url(b"victim-key"),)]
+    # 2. Confirm with it: it is not there, so it does not confirm.
+    _, r = confirm_with_passkey(victim, monkeypatch, b"attacker-key")
+    assert r.status_code == 400 and r.json()["error"]["code"] == "PASSKEY_UNKNOWN"
+    # 3. Remove the owner's passkey (even with a second one present), 4. regenerate codes, 5. delete: all refused.
+    conn = users.connect()
+    conn.execute("INSERT INTO credentials (credential_id, user_id, public_key, sign_count, transports, created_at, nickname) "
+                 "SELECT 'owner-second', user_id, x'00', 0, '[]', created_at, 'Laptop' FROM credentials")
+    conn.commit()
+    conn.close()
+    r = call(victim, "DELETE", f"/account/passkeys/{account.bytes_to_base64url(b'victim-key')}")
+    assert r.status_code == 403 and r.json()["error"]["code"] == "CONFIRM_REQUIRED"
+    assert call(victim, "POST", "/account/recovery-codes").json()["error"]["code"] == "CONFIRM_REQUIRED"
+    assert call(victim, "DELETE", "/account").json()["error"]["code"] == "CONFIRM_REQUIRED"
+    assert rows("SELECT count(*) FROM credentials") == [(2,)] and rows("SELECT count(*) FROM users") == [(1,)]
+    assert call(client(), "POST", "/account/recovery", {"code": codes[0]}).status_code == 200  # the owner's codes still work
+
+
+def test_a_passkey_added_in_this_session_cannot_confirm_it(env, monkeypatch):
+    c, _ = register(monkeypatch, "Grace", b"cred-1")
+    _, r = add_passkey(c, monkeypatch, b"cred-new")  # allowed: the sign-up just now is a strong sign-in
+    assert r.status_code == 200 and r.json()["user"]["passkeys"] == 2
+    start = users.now()
+    monkeypatch.setattr(users, "now", lambda: start + timedelta(minutes=6))
+    opts, r = confirm_with_passkey(c, monkeypatch, b"cred-new")
+    assert [d["id"] for d in opts["options"]["allowCredentials"]] == [account.bytes_to_base64url(b"cred-1")]
+    assert r.status_code == 400 and r.json()["error"]["code"] == "PASSKEY_TOO_NEW"
+    assert c.get("/account/settings").json()["confirmed_until"] is None
+    # The older passkey confirms this session; the new one confirms from its own next sign-in on.
+    assert confirm_with_passkey(c, monkeypatch, b"cred-1")[1].status_code == 200
+    assert call(c, "DELETE", f"/account/passkeys/{account.bytes_to_base64url(b'cred-1')}").status_code == 200
+    _, r = confirm_with_passkey(c, monkeypatch, b"cred-new")
+    assert r.status_code == 409 and r.json()["error"]["code"] == "PASSKEY_TOO_NEW"  # no older passkey left to offer
+    users.AUTH_LIMIT.reset()  # this test makes more passkey ceremonies than one caller may in a minute
+    other = client()
+    monkeypatch.setattr(account, "verify_authentication_response", lambda **kw: SimpleNamespace(new_sign_count=4))
+    opts = call(other, "POST", "/account/login/options").json()
+    signed = call(other, "POST", "/account/login/verify", {"challenge_id": opts["challenge_id"], "credential": {"id": account.bytes_to_base64url(b"cred-new")}})
+    assert signed.status_code == 200
+    monkeypatch.setattr(users, "now", lambda: start + timedelta(minutes=13))
+    assert confirm_with_passkey(other, monkeypatch, b"cred-new")[1].status_code == 200
+
+
+def test_an_orcid_account_adds_its_first_passkey_only_soon_after_an_orcid_sign_in(env, monkeypatch):
+    fresh = orcid_only(fresh_minutes_ago=2)
+    opts, r = add_passkey(fresh, monkeypatch, b"first-key")
+    assert opts["options"]["excludeCredentials"] == [] and r.status_code == 200 and r.json()["user"]["passkeys"] == 1
+    # The exception covers the first passkey only.
+    _, r = add_passkey(fresh, monkeypatch, b"second-key")
+    assert r.status_code == 403 and r.json()["error"]["code"] == "CONFIRM_REQUIRED"
+    # And that passkey cannot confirm this session: deleting needs a sign-in with it.
+    assert call(fresh, "POST", "/account/confirm/options").json()["error"]["code"] == "PASSKEY_TOO_NEW"
+    assert call(fresh, "DELETE", "/account").json()["error"]["code"] == "CONFIRM_REQUIRED"
+    stale = orcid_only(fresh_minutes_ago=6, orcid="0000-0001-5109-3700")
+    r = call(stale, "POST", "/account/passkeys/options")
+    assert r.status_code == 403 and r.json()["error"]["code"] == "ORCID_SIGN_IN_REQUIRED"
+    # A dev sign-in never qualifies.
+    assert call(dev("Dev"), "POST", "/account/passkeys/options").json()["error"]["code"] == "CONFIRM_REQUIRED"
+
+
+def test_unlinking_orcid_needs_a_fresh_confirmation(env, monkeypatch):
+    c, _ = register(monkeypatch)
+    uid = rows("SELECT id FROM users")[0][0]
+    conn = users.connect()
+    conn.execute("INSERT INTO orcid_links VALUES (?, ?, '2026-10-30T00:00:00Z')", (uid, ORCID))
+    conn.commit()
+    conn.close()
+    start = users.now()
+    monkeypatch.setattr(users, "now", lambda: start + timedelta(minutes=6))
+    assert call(c, "DELETE", "/account/orcid").json()["error"]["code"] == "CONFIRM_REQUIRED"
+    confirm_with_passkey(c, monkeypatch)
+    assert call(c, "DELETE", "/account/orcid").status_code == 200
