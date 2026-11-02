@@ -29,7 +29,7 @@ from webauthn.helpers.structs import (
     AuthenticatorSelectionCriteria, PublicKeyCredentialDescriptor, ResidentKeyRequirement, UserVerificationRequirement,
 )
 
-from . import account, users
+from . import account, mailer, users
 from .users import ApiError, Db, User, auth_rate_limit, iso, now
 
 router = APIRouter(prefix="/account", tags=["settings"], dependencies=[Depends(users.require_intent), Depends(users.write_quota)])
@@ -62,7 +62,7 @@ def _passkeys(conn, user_id: int) -> list[dict]:
 
 def _state(conn, user: User) -> dict:
     return {
-        "user": user.public(conn), "passkeys": _passkeys(conn, user.id), "orcid_available": account.orcid_configured(),
+        "user": user.public(conn), "passkeys": _passkeys(conn, user.id), "orcid_available": account.orcid_configured(), "email_available": mailer.configured(),
         "session_method": user.session_method, "confirmed_until": user.strong_until(),
     }
 
@@ -276,8 +276,8 @@ def unlink_orcid(_: Empty | None = None, user: User = Depends(users.current_user
     with Db() as conn:
         if not conn.execute("SELECT 1 FROM orcid_links WHERE user_id = ?", (user.id,)).fetchone():
             raise ApiError(404, "ORCID_NOT_LINKED", "No ORCID iD is linked to this account.")
-        if not conn.execute("SELECT 1 FROM credentials WHERE user_id = ?", (user.id,)).fetchone():
-            raise ApiError(409, "ORCID_ONLY_SIGN_IN", "ORCID is the only way into this account. Add a passkey before you unlink it.")
+        if not conn.execute("SELECT 1 FROM credentials WHERE user_id = ? UNION ALL SELECT 1 FROM emails WHERE user_id = ?", (user.id, user.id)).fetchone():
+            raise ApiError(409, "ORCID_ONLY_SIGN_IN", "ORCID is the only way into this account. Add a passkey or an email address before you unlink it.")
         users.require_strong(user)
         conn.execute("DELETE FROM orcid_links WHERE user_id = ?", (user.id,))
         users.audit(conn, user.id, "orcid unlinked")
@@ -305,6 +305,7 @@ def export_data(conn, user_id: int) -> dict:
             "public": None if not row["share_id"] else {"share_id": row["share_id"], "published_at": row["published_at"], "page": json.loads(row["share_snapshot"] or "null")},
         })
     link = one("SELECT orcid, linked_at FROM orcid_links WHERE user_id = ?")
+    email = one("SELECT email, verified_at FROM emails WHERE user_id = ?")
     return {
         "format": "locus account export, version 1",
         "exported_at": iso(now()),
@@ -314,6 +315,7 @@ def export_data(conn, user_id: int) -> dict:
         "sessions": many("SELECT method, created_at, expires_at, last_seen_at, user_agent FROM sessions WHERE user_id = ? ORDER BY created_at"),
         "recovery_codes": {"total": len(codes), "left": sum(1 for c in codes if c["used_at"] is None), "used_at": [c["used_at"] for c in codes if c["used_at"]]},
         "orcid": dict(link) if link else None,
+        "email": dict(email) if email else None,
         "lists": lists,
         "watched_searches": [dict(w) | {"seen": json.loads(w["seen"])} for w in many(
             "SELECT question, since, created_at, seen FROM watches WHERE user_id = ? ORDER BY id")],

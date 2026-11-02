@@ -6,10 +6,11 @@ import { ArrowUpRight, Download, KeyRound } from "lucide-react";
 import { Wordmark } from "@/components/logo";
 import { BackToResults } from "@/components/back-to-results";
 import { ORCID_OUTCOME, RecoveryCodes } from "@/components/account-page";
+import { EmailCode } from "@/components/email-code";
 import { EmptyState, Heading, LINK, MUTED_LINK } from "@/components/page-kit";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { ACCOUNT_EVENT, AccountError, describe, me, orcidStartHref, signInHref } from "@/lib/account";
+import { ACCOUNT_EVENT, AccountError, describe, me, orcidStartHref, removeEmail, signInHref } from "@/lib/account";
 import { listFollows, orcidUrl, unfollow, type Follow } from "@/lib/follows";
 import {
   addPasskey, confirmCode, confirmPasskey, deleteAccount, exportHref, getSettings, regenerateCodes, removePasskey, rename,
@@ -62,6 +63,17 @@ function Confirm({ why, s, onConfirmed }: { why: string; s: Settings; onConfirme
     setError("");
     work().then(onConfirmed, (e) => setError(describe(e))).finally(() => setBusy(""));
   };
+  const confirmByEmail = () => getSettings().then(onConfirmed, (e) => setError(describe(e)));
+  if (!hasPasskey && s.user.recovery_codes_left === 0 && s.user.email) {
+    return (
+      <div ref={box} tabIndex={-1} role="group" aria-labelledby="confirm-title" className="grid max-w-xl gap-3 border-l-2 border-foreground pl-4 text-[13px] outline-none" data-confirm="email">
+        <p id="confirm-title" className="font-medium">Confirm with a code sent to your email</p>
+        <p className="text-muted-foreground">{why} The confirmation lasts five minutes.</p>
+        <EmailCode purpose="confirm" idPrefix="confirm-email" sendLabel="Email me a code" onDone={confirmByEmail} />
+        {error && <p role="alert" className="text-destructive">{error}</p>}
+      </div>
+    );
+  }
   if (!hasPasskey && s.user.recovery_codes_left === 0) {
     return (
       <div ref={box} tabIndex={-1} role="group" aria-labelledby="confirm-title" className="grid max-w-xl gap-3 border-l-2 border-foreground pl-4 text-[13px] outline-none" data-confirm="add-passkey-first">
@@ -88,6 +100,12 @@ function Confirm({ why, s, onConfirmed }: { why: string; s: Settings; onConfirme
           placeholder="ABCD-EFGH-JKLM" className="h-9 max-w-[14rem] bg-card font-mono" />
         <Button type="submit" variant="outline" disabled={!!busy || !code.trim()}>{busy === "code" ? "Checking…" : "Confirm with a recovery code"}</Button>
       </form>
+      {s.user.email && (
+        <details className="text-muted-foreground">
+          <summary className={cn("cursor-pointer", MUTED_LINK)}>Or confirm with a code sent to your email</summary>
+          <div className="mt-3"><EmailCode purpose="confirm" idPrefix="confirm-email" sendLabel="Email me a code" onDone={confirmByEmail} /></div>
+        </details>
+      )}
       {error && <p role="alert" className="text-destructive">{error}</p>}
     </div>
   );
@@ -327,6 +345,55 @@ function Orcid({ s, onChange }: { s: Settings; onChange: (s: Settings) => void }
   );
 }
 
+// The account's email address: sign-in codes go there. Adding or changing it needs a code sent to the new address;
+// removing it needs a fresh confirmation, and is refused when the address is the account's only way in.
+function Email({ s, onChange }: { s: Settings; onChange: (s: Settings) => void }) {
+  const [changing, setChanging] = useState(false);
+  const [asking, setAsking] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [said, setSaid] = useState("");
+  const email = s.user.email;
+  const linked = () => getSettings().then((next) => { onChange(next); setChanging(false); setSaid("Email address saved."); }, (e) => setError(describe(e)));
+  const remove = () => {
+    if (!confirmed(s)) { setAsking(true); return; }
+    setBusy(true);
+    setError("");
+    removeEmail().then(() => getSettings()).then((next) => { onChange(next); setAsking(false); setSaid("Email address removed."); }, (e) => {
+      if (e instanceof AccountError && e.code === "CONFIRM_REQUIRED") setAsking(true);
+      else setError(describe(e));
+    }).finally(() => setBusy(false));
+  };
+  if (!s.email_available && !email) {
+    return (
+      <div className="grid gap-2" data-settings-email="off">
+        <h3 className="label text-muted-foreground">Email</h3>
+        <p className="text-[13px] text-muted-foreground">Email sign-in is not switched on for this server yet.</p>
+      </div>
+    );
+  }
+  return (
+    <div className="grid gap-2" data-settings-email={email ? "linked" : "none"}>
+      <h3 className="label text-muted-foreground">Email</h3>
+      <p className="text-[12.5px] text-muted-foreground">You can sign in with a code sent to this address. locus sends nothing else to it.</p>
+      {email && !changing && (
+        <p className={ACTIONS}>
+          <span className="font-mono">{email}</span>
+          {s.email_available && <button type="button" className={MUTED_LINK} onClick={() => { setChanging(true); setSaid(""); }}>Change</button>}
+          <button type="button" className={MUTED_LINK} disabled={busy} onClick={remove}>{busy ? "Removing…" : "Remove"}</button>
+        </p>
+      )}
+      {(!email || changing) && s.email_available && (
+        <EmailCode purpose="link" idPrefix="settings-email" sendLabel={email ? "Send a code to the new address" : "Send a code"} onDone={linked} />
+      )}
+      {changing && <p className="text-[13px]"><button type="button" className={MUTED_LINK} onClick={() => setChanging(false)}>Keep {email}</button></p>}
+      <span role="status" className="text-[13px] text-muted-foreground">{said}</span>
+      {asking && <Confirm why="Removing your email address changes how this account is signed in to." s={s} onConfirmed={(next) => { onChange(next); setAsking(false); }} />}
+      {error && <p role="alert" className="text-[13px] text-destructive">{error}</p>}
+    </div>
+  );
+}
+
 // ---------------------------------------------------------------- Following
 
 function Following() {
@@ -484,6 +551,7 @@ export function SettingsPage() {
           </nav>
           <Section id="account" title="Account">
             <DisplayName s={state} onChange={setState} />
+            <Email s={state} onChange={setState} />
             <Passkeys s={state} onChange={setState} />
             <Recovery s={state} onChange={setState} />
             <Orcid s={state} onChange={setState} />

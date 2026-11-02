@@ -6,7 +6,7 @@ import { AccountError, announce, type Account } from "@/lib/account";
 
 export type Passkey = { id: string; nickname: string; created_at: string; last_used_at: string | null };
 export type Settings = {
-  user: Account; passkeys: Passkey[]; orcid_available: boolean; session_method: string; confirmed_until: string | null;
+  user: Account; passkeys: Passkey[]; orcid_available: boolean; email_available: boolean; session_method: string; confirmed_until: string | null;
 };
 
 async function call<T>(method: "GET" | "POST" | "PATCH" | "DELETE", path: string, body?: unknown): Promise<T> {

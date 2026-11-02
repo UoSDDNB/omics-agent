@@ -31,7 +31,7 @@ DEFAULT_DB = Path(__file__).resolve().parent.parent / "data" / "users.db"
 MIGRATIONS = Path(__file__).resolve().parent / "migrations" / "users"
 COOKIE = "locus_session"
 SESSION_DAYS = 30
-STRONG_METHODS = ("passkey", "recovery")  # sign-ins that prove the person holds the account's passkey or codes
+STRONG_METHODS = ("passkey", "recovery", "email")  # sign-ins that prove the person holds the account's passkey, codes or address
 STRONG_WINDOW = timedelta(minutes=5)  # how recent such a sign-in must be to delete the account or regenerate codes
 SESSION_REFRESH = timedelta(hours=1)  # how stale last_seen_at may get before a request slides the expiry forward
 # Paths whose errors (including request validation) use the shared {"error": {...}} shape. Later routers add theirs.
@@ -244,10 +244,11 @@ class User:
             link = conn.execute("SELECT orcid FROM orcid_links WHERE user_id = ?", (self.id,)).fetchone()
             passkeys = conn.execute("SELECT count(*) FROM credentials WHERE user_id = ?", (self.id,)).fetchone()[0]
             codes = conn.execute("SELECT count(*) FROM recovery_codes WHERE user_id = ? AND used_at IS NULL", (self.id,)).fetchone()[0]
+            email = conn.execute("SELECT email FROM emails WHERE user_id = ?", (self.id,)).fetchone()
         finally:
             if own:
                 conn.close()
-        return {"id": self.id, "display_name": self.display_name, "created_at": self.created_at, "orcid": link["orcid"] if link else None,
+        return {"id": self.id, "display_name": self.display_name, "created_at": self.created_at, "orcid": link["orcid"] if link else None, "email": email["email"] if email else None,
                 "passkeys": passkeys, "recovery_codes_left": codes}
 
 
@@ -285,7 +286,7 @@ def require_strong(user: User) -> None:
     """Refuses (403 CONFIRM_REQUIRED) unless this session saw a passkey or recovery-code sign-in in the last five
     minutes. A dev sign-in or ORCID sign-in never counts; /account/confirm/* records a fresh one on the session."""
     if user.strong_until() is None:
-        raise ApiError(403, "CONFIRM_REQUIRED", "Confirm it is you with your passkey or a recovery code first. The confirmation lasts five minutes.")
+        raise ApiError(403, "CONFIRM_REQUIRED", "Confirm it is you with your passkey, a recovery code or an email code first. The confirmation lasts five minutes.")
 
 
 def mark_strong(conn: sqlite3.Connection, user: User) -> str:
@@ -440,7 +441,7 @@ def auth_rate_limit(request: Request) -> None:
 
 def install(app: FastAPI) -> None:
     """Adds the shared error handlers and the /account routes to an app."""
-    from . import account
+    from . import account, email_auth
 
     @app.middleware("http")
     async def no_store_account(request: Request, call_next):
@@ -453,3 +454,4 @@ def install(app: FastAPI) -> None:
     app.add_exception_handler(ApiError, _api_error)
     app.add_exception_handler(RequestValidationError, _validation_error)
     app.include_router(account.router)
+    app.include_router(email_auth.router)

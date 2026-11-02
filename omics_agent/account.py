@@ -19,7 +19,7 @@ from webauthn.helpers import bytes_to_base64url
 from webauthn.helpers.exceptions import InvalidAuthenticationResponse, InvalidRegistrationResponse
 from webauthn.helpers.structs import AuthenticatorSelectionCriteria, ResidentKeyRequirement, UserVerificationRequirement
 
-from . import users
+from . import mailer, users
 from .users import ApiError, Db, User, auth_rate_limit, iso, now
 
 router = APIRouter(prefix="/account", tags=["account"], dependencies=[Depends(users.require_intent)])
@@ -74,7 +74,7 @@ def _take_challenge(conn, cid: str, kind: str):
 @router.get("/me")
 def me(user: User | None = Depends(users.optional_user)) -> dict:
     """The signed-in account, or {"user": null}; also which sign-in methods this server offers."""
-    return {"user": user.public() if user else None, "orcid_available": orcid_configured()}
+    return {"user": user.public() if user else None, "orcid_available": orcid_configured(), "email_available": mailer.configured()}
 
 
 class Empty(BaseModel):

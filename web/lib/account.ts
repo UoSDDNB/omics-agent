@@ -2,8 +2,8 @@
 // /api rewrite, so the HttpOnly session cookie is first-party and the browser sends it by itself.
 import { API } from "@/lib/api";
 
-export type Account = { id: number; display_name: string; created_at: string; orcid: string | null; passkeys: number; recovery_codes_left: number };
-export type Me = { user: Account | null; orcid_available: boolean };
+export type Account = { id: number; display_name: string; created_at: string; orcid: string | null; email: string | null; passkeys: number; recovery_codes_left: number };
+export type Me = { user: Account | null; orcid_available: boolean; email_available: boolean };
 
 // The API's shared error shape: {"error": {"code", "message", "transient"}}.
 export class AccountError extends Error {
@@ -69,6 +69,25 @@ export async function signInWithRecoveryCode(code: string): Promise<Account> {
   return done.user;
 }
 
+// Email codes: ask for a six-digit code, then type it back. "sign-in" signs in or creates an account; "link" adds the
+// address to the signed-in account; "confirm" sends to the account's own address and marks this session as confirmed.
+export type EmailPurpose = "sign-in" | "link" | "confirm";
+export async function emailCode(purpose: EmailPurpose, email = ""): Promise<{ challenge_id: string; sent_to: string }> {
+  return send("/account/email/start", { purpose, email });
+}
+
+export async function verifyEmailCode(challengeId: string, code: string): Promise<{ user: Account; created?: boolean }> {
+  const done = await send<{ user: Account; created?: boolean }>("/account/email/verify", { challenge_id: challengeId, code });
+  announce();
+  return done;
+}
+
+export async function removeEmail(): Promise<Account> {
+  const done = await send<{ user: Account }>("/account/email/unlink");
+  announce();
+  return done.user;
+}
+
 // Where to go after signing in: only a path on this site, never another origin.
 export function safeReturn(path: string | null | undefined): string | null {
   return path && path.startsWith("/") && !path.startsWith("//") && !path.includes("\\") && path.length <= 500 ? path : null;
@@ -86,6 +105,8 @@ export const orcidStartHref = (returnTo: string) => `${API}/account/orcid/start?
 export function describe(error: unknown): string {
   if (error instanceof AccountError) return error.message;
   if (error instanceof Error && (error.name === "NotAllowedError" || error.name === "AbortError")) return "The passkey request was cancelled or timed out.";
+  // Browsers allow passkeys only on https or localhost; anywhere else the request fails before any dialog shows.
+  if (error instanceof Error && (error.name === "SecurityError" || !window.isSecureContext)) return "Passkeys only work on a secure (https) address. Sign in with an email code instead.";
   if (error instanceof Error && error.name === "InvalidStateError") return "This device already holds a passkey for this account.";
   return "Something went wrong. Please try again.";
 }

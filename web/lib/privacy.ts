@@ -6,7 +6,7 @@ export const PRIVACY_PATH = "/privacy";
 
 // One paragraph for /settings.
 export const PRIVACY_SUMMARY =
-  "For an account, locus keeps your display name, the public half of each passkey, scrambled copies of your recovery codes and sign-in tokens, which browser each sign-in came from, your ORCID iD if you link one, your lists with their notes and tags, your watched searches, the people you follow, and a log of account events such as sign-ins, kept until you delete the account. Like most web servers, it also logs each request with your IP address. It runs no analytics. It sets one cookie that keeps you signed in, and a short-lived one during an ORCID sign-in.";
+  "For an account, locus keeps your display name, the public half of each passkey, scrambled copies of your recovery codes and sign-in tokens, which browser each sign-in came from, your email address if you give one, your ORCID iD if you link one, your lists with their notes and tags, your watched searches, the people you follow, and a log of account events such as sign-ins, kept until you delete the account. Like most web servers, it also logs each request with your IP address. It runs no analytics. It sets one cookie that keeps you signed in, and a short-lived one during an ORCID sign-in.";
 
 export type PrivacyFact = { id: string; title: string; body: string[] };
 
@@ -27,6 +27,7 @@ export const PRIVACY_FACTS: PrivacyFact[] = [
       "Each passkey's public half, its name, when it was added and last used. The private half stays on your device or in your password manager.",
       "Your recovery codes as SHA-256 hashes only. locus shows the codes once and cannot show them again.",
       "Sessions: a hash of the sign-in token, how you signed in, when, and which browser each sign-in came from (its user-agent string).",
+      "Your email address, if you sign in with one or add one. locus uses it only to send sign-in codes, through the email service Brevo, and sends nothing else to it. Each code is kept as a hash for ten minutes; a hash of the address and the time of each code sent are kept for a day, to limit how many codes one address gets.",
       "Your ORCID iD, if you link one.",
       "Your lists with their items, notes and tags, and the public copy of any list you share.",
       "Your watched searches and the people you follow, with the datasets you marked as seen.",

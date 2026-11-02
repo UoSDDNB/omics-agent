@@ -5,6 +5,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { ArrowUpRight, KeyRound } from "lucide-react";
 import { Wordmark } from "@/components/logo";
 import { BackToResults } from "@/components/back-to-results";
+import { EmailCode } from "@/components/email-code";
 import { Heading, LINK, MUTED_LINK } from "@/components/page-kit";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -107,7 +108,7 @@ export function AccountPage() {
         !failed && <p className="text-[13px] text-muted-foreground">Checking whether you are signed in…</p>
       ) : user ? (
         <section aria-labelledby="signed-in" className="grid gap-6" data-account-page="signed-in">
-          <p id="signed-in" className="text-[15px]">Signed in as <span className="font-medium">{user.display_name}</span>.</p>
+          <p id="signed-in" className="text-[15px]">Signed in as <span className="font-medium">{user.display_name}</span>{user.email && <> with <span className="font-mono text-[14px]">{user.email}</span></>}.</p>
           <div data-account-stats className="grid grid-cols-2 gap-y-3 border-y border-rule py-3 sm:flex sm:flex-wrap">
             <Fact label="Passkeys">{user.passkeys}</Fact>
             <Fact label="Recovery codes left">{user.recovery_codes_left}</Fact>
@@ -122,8 +123,18 @@ export function AccountPage() {
         </section>
       ) : (
         <div className="grid gap-10" data-account-page="guest">
-          <section aria-labelledby="sign-in" className="grid max-w-xl gap-4">
-            <Heading id="sign-in">Sign in</Heading>
+          {state.email_available && (
+            <section aria-labelledby="by-email" className="grid max-w-xl gap-4">
+              <Heading id="by-email">Sign in with email</Heading>
+              <p className="text-[14px] text-muted-foreground">
+                locus emails you a six-digit code. If no account uses the address yet, the code creates one. There is no
+                password, and locus sends nothing else to the address.
+              </p>
+              <EmailCode purpose="sign-in" idPrefix="sign-in" sendLabel="Email me a code" onDone={() => { refresh(); goBack(); }} />
+            </section>
+          )}
+          <section aria-labelledby="sign-in" className={cn("grid max-w-xl gap-4", state.email_available && "border-t border-rule pt-8")}>
+            <Heading id="sign-in">{state.email_available ? "Sign in with a passkey" : "Sign in"}</Heading>
             <div className="flex flex-wrap items-center gap-3">
               <Button disabled={!!busy} onClick={() => run("passkey", signInWithPasskey, goBack)}>
                 <KeyRound aria-hidden />{busy === "passkey" ? "Waiting for your passkey…" : "Sign in with a passkey"}
@@ -135,10 +146,10 @@ export function AccountPage() {
           </section>
 
           <section aria-labelledby="create" className="grid max-w-xl gap-4 border-t border-rule pt-8">
-            <Heading id="create">Create an account</Heading>
+            <Heading id="create">{state.email_available ? "Create an account with a passkey" : "Create an account"}</Heading>
             <p className="text-[14px] text-muted-foreground">
-              locus signs you in with a passkey held by your phone, computer or password manager. There is no password to
-              remember and no email address to give.
+              A passkey is held by your phone, computer or password manager. There is no password to remember
+              {state.email_available ? ", and you can add an email address later in Settings." : " and no email address to give."}
             </p>
             <form className="grid gap-3" onSubmit={(e) => { e.preventDefault(); run("create", () => createWithPasskey(name.trim()).then((d) => setCodes(d.recovery_codes))); }}>
               <label htmlFor="display-name" className="label text-muted-foreground">Display name</label>

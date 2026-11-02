@@ -6,7 +6,18 @@ an account does, what locus stores for it, and what is not built yet.
 ## Signing in
 
 - **Passkeys.** You create an account by choosing a display name and making a passkey on your phone, computer or
-  password manager. locus never sees a password and asks for no email address. Sign in later with the same passkey.
+  password manager. locus never sees a password. Sign in later with the same passkey. Browsers allow passkeys only on
+  https or `localhost`, so on a plain-http address use email instead.
+- **Email codes.** Type an address, get a six-digit code by email, type it back. The first code for an address creates
+  an account (named after the part before the @, changeable in Settings); later codes sign in to it. A code works once,
+  for ten minutes and five guesses, and is stored only as a hash. Asking for a code answers the same way whether or not
+  the address has an account. Limits: 3 codes per address in 15 minutes, 10 a day, and `LOCUS_MAIL_DAILY_CAP` (default
+  250) in total a day. A passkey account can add an address in Settings (a code to the new address proves it), and an
+  email code counts as a fresh confirmation for deleting the account or new recovery codes. The address cannot be
+  removed while it is the only way in. Mail goes out over SMTP: `LOCUS_SMTP_HOST`, `LOCUS_SMTP_PORT` (587),
+  `LOCUS_SMTP_USER`, `LOCUS_SMTP_PASSWORD`, `LOCUS_MAIL_FROM` (Brevo's relay on the public site). Without them the email
+  routes answer 404 and the form is hidden. For local trials only, `LOCUS_MAIL_DEV_LOG=1` writes the mail to
+  `data/dev-mail.log` instead of sending it.
 - **Recovery codes.** When the account is created, locus shows ten one-time recovery codes, once. Each signs you in a
   single time if you lose your passkey. locus keeps only their SHA-256 hashes.
 - **ORCID.** When the server has an ORCID client (`ORCID_CLIENT_ID`, `ORCID_CLIENT_SECRET`, optional `ORCID_BASE` for
