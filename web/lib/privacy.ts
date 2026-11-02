@@ -31,6 +31,7 @@ export const PRIVACY_FACTS: PrivacyFact[] = [
       "Your lists with their items, notes and tags, and the public copy of any list you share.",
       "Your watched searches and the people you follow, with the datasets you marked as seen.",
       "A log of account events such as sign-ins, new passkeys and new recovery codes, kept until you delete the account.",
+      "The times of your changes in the last minute, so that one account cannot flood the server. Older times are dropped.",
     ],
   },
   {

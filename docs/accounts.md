@@ -21,7 +21,8 @@ an account does, what locus stores for it, and what is not built yet.
 Account data lives in its own SQLite file, `OMICS_USERS_DB` (default `data/users.db`, not in git), never in
 `omics.db`. For each account: the display name and creation time; each passkey's public key, counter, transports,
 creation and last-use times; hashed recovery codes; your lists and their items (and the public copy of any list you share), your watched searches and the people you follow (their ORCID, name and the datasets you marked seen; see below); a linked ORCID iD; sessions (a hash of the cookie token, the
-sign-in method, times and the browser's user-agent string); and a short audit trail of sign-ins and changes. locus runs
+sign-in method, times and the browser's user-agent string); and a short audit trail of sign-ins and changes. It also keeps
+the times of an account's writes in the last minute, for the write quota. locus runs
 no analytics. The wording users read lives in one place, `web/lib/privacy.ts`, which the in-app `/privacy` page and the
 Privacy section of `/settings` render; change it together with this section when the users DB changes.
 
@@ -41,7 +42,7 @@ Privacy section of `/settings` render; change it together with this section when
   verification (PIN, fingerprint or face) is required when creating a passkey and at every sign-in, and a response
   without it is refused, since the passkey is the only factor. A refused passkey gets one fixed message; the reason is
   logged on the server.
-- ORCID: `/account/orcid/start` sets a five-minute HttpOnly cookie `locus_orcid` with a random nonce whose hash is
+- ORCID: `/account/orcid/start` sets a five-minute HttpOnly cookie `__Host-locus_orcid` (`locus_orcid` under `LOCUS_COOKIE_INSECURE=1`) with a random nonce whose hash is
   stored with the OAuth state. The callback refuses a browser without the matching cookie, so a forwarded authorize or
   callback link signs no one in and links nothing. A link attempt also needs the same account to be signed in when
   ORCID sends the browser back.
@@ -49,7 +50,52 @@ Privacy section of `/settings` render; change it together with this section when
   `LOCUS_DEV_LOGIN=1` and the API's peer and every hop listed in `X-Forwarded-For` are loopback addresses. Those hops
   are what the header reports: without a proxy in front that appends the real address, a client can forge them, so the
   web app must listen on 127.0.0.1 wherever this flag is set (the page gate does). Never set it on a public server.
+- Client address: `LOCUS_TRUSTED_PROXIES` is the number of proxies in front of the web app that each append the
+  caller's address to `X-Forwarded-For` (default 1, for the Cloudflare tunnel alone). The API counts that many entries
+  from the right and takes that one. With `0` it ignores the header and uses its peer address, so every caller behind
+  the web app shares one address. A header with fewer entries than that counts as absent, and only a loopback peer
+  (the web app's `/api` rewrite) is ever replaced by a forwarded address.
+- An IPv6 address counts as its /64 network for every rate limit, sign-in included.
+- Dev sign-in secret: when `LOCUS_DEV_LOGIN_SECRET` is set, `POST /account/dev-login` also needs the header
+  `X-Locus-Dev-Secret` with exactly that value, else it answers 404 like any unknown path. Set a fresh random value
+  whenever `LOCUS_DEV_LOGIN=1` runs on a machine other people can reach.
+- Cookies: while cookies are Secure, the session cookie is `__Host-locus_session` and the ORCID cookie is
+  `__Host-locus_orcid`. The prefix makes the browser refuse a copy set by a sibling subdomain. Under
+  `LOCUS_COOKIE_INSECURE=1` they are `locus_session` and `locus_orcid`. A cookie under the other name is ignored.
+- Origin: when `LOCUS_ORIGIN` is set, a state-changing request whose `Origin` header names another origin gets 403
+  `ORIGIN_REFUSED`. CORS grants only the `Content-Type` header to `localhost:3000` and `:3020`, never
+  `X-Locus-Intent`.
+- Write quota: Every write by a signed-in account counts against one ledger of 120 a minute. It covers lists, watched
+  searches, follows and settings (sign-in and sign-out have their own limits), lives in the users DB table
+  `quota_events`, which keeps the last minute only, and answers 429 `RATE_LIMITED` with `Retry-After` when full.
+- Storage cap: the notes, tags and snapshots of all of an account's list items together hold at most 5,000,000
+  characters. A save or edit that would pass it gets 409 `STORAGE_FULL`, and a guest import leaves out the items that
+  do not fit.
+- The follow limit is 30 a minute per account and 60 a minute overall, half of the ORCID pace.
+- Caching: every API response under `/account`, `/lists` and `/follows` carries `Cache-Control: no-store`, and the
+  `/account` and `/settings` pages are rendered per request.
 - Errors from account routes have one shape: `{"error": {"code", "message", "transient"}}`.
+
+## Threat model
+
+**What locus protects.** An account holds lists with private notes, watched searches, followed ORCID iDs, the
+account's passkeys and recovery codes, and an activity log. None of it is medical or financial, but notes and follows
+show what a person is working on, so only the signed-in owner can read them, and a public list shows only what its
+owner chose when publishing it.
+
+**Who it protects against.** Other websites the user visits (CSRF, login CSRF, and cookies tossed from a sibling
+subdomain); other locus accounts (every row is scoped to its owner, and another account's id answers 404); anyone
+guessing or brute-forcing a sign-in (passkeys with user verification, 60-bit recovery codes, per-address and overall
+rate limits); a stolen session cookie on its own (deleting the account, new recovery codes, adding a passkey and
+linking ORCID need a passkey or recovery-code confirmation within five minutes); and a single account or address
+trying to fill the disk or spend the upstream budgets (the write ledger, the storage cap, and the follow and person
+limits).
+
+**What it does not protect against.** A compromised device or browser; anyone holding the server or the users DB
+file, which is not encrypted at rest (session tokens and recovery codes are stored only as hashes); a deployment
+without the front proxy, or with `LOCUS_TRUSTED_PROXIES` set wrong, where client addresses can be forged and the
+per-address limits weaken; many accounts acting together within the overall limits; and identity claims upstream,
+since ORCID records and Europe PMC author claims are taken as their owners wrote them.
 
 ## Saved datasets and lists
 

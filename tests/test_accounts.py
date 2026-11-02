@@ -78,7 +78,7 @@ def test_session_lifecycle_sign_in_me_sign_out(env):
     cookie = r.headers["set-cookie"]
     assert "locus_session=" in cookie and "HttpOnly" in cookie and "SameSite=lax" in cookie and "Path=/" in cookie and "Secure" in cookie
     assert "Domain" not in cookie
-    token = c.cookies.get("locus_session")
+    token = c.cookies.get(users.cookie_name())
     assert len(token) >= 43
     # The DB keeps only the token's hash.
     stored = rows(env, "SELECT token_sha256, method FROM sessions")
@@ -90,20 +90,20 @@ def test_session_lifecycle_sign_in_me_sign_out(env):
     assert rows(env, "SELECT count(*) FROM sessions") == [(0,)]
     # A stolen copy of the old token no longer works either.
     other = client()
-    other.cookies.set("locus_session", token)
+    other.cookies.set(users.cookie_name(), token)
     assert other.get("/account/me").json()["user"] is None
 
 
 def test_signing_in_again_ends_the_old_session(env):
     c = client()
     dev_login(c, "First")
-    old = c.cookies.get("locus_session")
+    old = c.cookies.get(users.cookie_name())
     dev_login(c, "Second")
-    assert c.cookies.get("locus_session") != old
+    assert c.cookies.get(users.cookie_name()) != old
     assert c.get("/account/me").json()["user"]["display_name"] == "Second"
     assert rows(env, "SELECT count(*) FROM sessions") == [(1,)]
     stale = client()
-    stale.cookies.set("locus_session", old)
+    stale.cookies.set(users.cookie_name(), old)
     assert stale.get("/account/me").json()["user"] is None
 
 
@@ -502,7 +502,7 @@ def test_orcid_attempt_only_finishes_in_the_browser_that_started_it(env, orcid):
     # The attacker's own browser can still finish its own attempt, and the cookie is cleared afterwards.
     assert attacker.get("/account/orcid/callback", params={"state": state, "code": "abc"}).headers["location"] == "/account?orcid=linked"
     assert rows(env, "SELECT user_id FROM orcid_links") == [(uid,)]
-    assert attacker.cookies.get("locus_orcid") is None
+    assert attacker.cookies.get(account.orcid_cookie_name()) is None
 
 
 def test_orcid_link_must_be_finished_by_the_account_that_started_it(env, orcid):

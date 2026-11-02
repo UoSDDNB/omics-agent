@@ -22,7 +22,7 @@ from pydantic import BaseModel, Field, field_validator
 from . import users
 from .users import ApiError, Db, User, iso
 
-router = APIRouter(prefix="/lists", tags=["lists"], dependencies=[Depends(users.require_intent)])
+router = APIRouter(prefix="/lists", tags=["lists"], dependencies=[Depends(users.require_intent), Depends(users.write_quota)])
 
 SAVED = "Saved"
 MAX_LISTS = 100
@@ -38,7 +38,8 @@ REPOSITORY_NAMES = {"MetabolomicsWorkbench": "Metabolomics Workbench", "Expressi
 PUBLIC_ITEMS = 50  # items a public page shows (papertok's limit)
 PUBLISH_PER_DAY = 60  # publishes and updates per account in any 24 hours
 SHARE_ID = re.compile(r"^[0-9a-f]{32}$")
-LIMITS = {"public_items": PUBLIC_ITEMS, "lists": MAX_LISTS, "items": MAX_ITEMS, "name": NAME_MAX, "description": DESCRIPTION_MAX, "note": NOTE_MAX, "tags": TAGS_MAX, "tag": TAG_MAX}
+STORAGE_MAX = 5_000_000
+LIMITS = {"public_items": PUBLIC_ITEMS, "lists": MAX_LISTS, "items": MAX_ITEMS, "name": NAME_MAX, "description": DESCRIPTION_MAX, "note": NOTE_MAX, "tags": TAGS_MAX, "tag": TAG_MAX, "storage": STORAGE_MAX}
 
 
 # ---------------------------------------------------------------- request bodies
@@ -278,6 +279,21 @@ def _resolve(conn, user_id: int, list_ref: str) -> int:
     return int(list_ref)
 
 
+def _storage_usage(conn, user_id: int) -> int:
+    return conn.execute(
+        "SELECT coalesce(sum(length(i.note) + length(i.tags) + length(i.snapshot)), 0) FROM list_items i "
+        "JOIN lists l ON l.id = i.list_id WHERE l.user_id = ?",
+        (user_id,),
+    ).fetchone()[0]
+
+
+def _stored_size(note: str, tags_json: str, snapshot_json: str) -> int:
+    return len(note) + len(tags_json) + len(snapshot_json)
+
+
+_STORAGE_MSG = "Your lists hold as much as one account may keep. Remove items or shorten notes to make room."
+
+
 @router.post("/{list_ref}/items")
 def add_item(list_ref: str, body: ItemIn, response: Response, user: User = Depends(users.current_user)) -> dict:
     """Adds a dataset; adding one the list already holds changes nothing and answers 200 with "added": false."""
@@ -289,9 +305,13 @@ def add_item(list_ref: str, body: ItemIn, response: Response, user: User = Depen
             return {"list_id": list_id, "added": False, "item": _item(old)}
         if conn.execute("SELECT count(*) FROM list_items WHERE list_id = ?", (list_id,)).fetchone()[0] >= MAX_ITEMS:
             raise ApiError(409, "LIMIT_REACHED", f"A list holds at most {MAX_ITEMS} datasets. Start another list for more.")
+        tags_json = json.dumps(body.tags)
+        snapshot_json = body.snapshot.model_dump_json()
+        if _storage_usage(conn, user.id) + _stored_size(body.note, tags_json, snapshot_json) > STORAGE_MAX:
+            raise ApiError(409, "STORAGE_FULL", _STORAGE_MSG)
         conn.execute(
             "INSERT INTO list_items (list_id, accession, added_at, note, tags, snapshot) VALUES (?, ?, ?, ?, ?, ?)",
-            (list_id, body.accession, iso(users.now()), body.note, json.dumps(body.tags), body.snapshot.model_dump_json()),
+            (list_id, body.accession, iso(users.now()), body.note, tags_json, snapshot_json),
         )
         _touch(conn, list_id)
         row = conn.execute("SELECT * FROM list_items WHERE list_id = ? AND accession = ?", (list_id, body.accession)).fetchone()
@@ -303,13 +323,21 @@ def add_item(list_ref: str, body: ItemIn, response: Response, user: User = Depen
 def edit_item(list_ref: str, accession: str, body: ItemPatch, user: User = Depends(users.current_user)) -> dict:
     with Db() as conn:
         list_id = _resolve(conn, user.id, list_ref)
-        if body.note is not None:
-            conn.execute("UPDATE list_items SET note = ? WHERE list_id = ? AND accession = ?", (body.note, list_id, accession))
-        if body.tags is not None:
-            conn.execute("UPDATE list_items SET tags = ? WHERE list_id = ? AND accession = ?", (json.dumps(body.tags), list_id, accession))
         row = conn.execute("SELECT * FROM list_items WHERE list_id = ? AND accession = ?", (list_id, accession)).fetchone()
         if not row:
             raise ApiError(404, "ITEM_NOT_FOUND", f"This list does not hold {accession}.")
+        new_note = body.note if body.note is not None else row["note"]
+        new_tags_json = json.dumps(body.tags) if body.tags is not None else row["tags"]
+        snapshot_json = row["snapshot"]
+        old_size = _stored_size(row["note"], row["tags"], row["snapshot"])
+        new_size = _stored_size(new_note, new_tags_json, snapshot_json)
+        if new_size > old_size and _storage_usage(conn, user.id) - old_size + new_size > STORAGE_MAX:
+            raise ApiError(409, "STORAGE_FULL", _STORAGE_MSG)
+        if body.note is not None:
+            conn.execute("UPDATE list_items SET note = ? WHERE list_id = ? AND accession = ?", (body.note, list_id, accession))
+        if body.tags is not None:
+            conn.execute("UPDATE list_items SET tags = ? WHERE list_id = ? AND accession = ?", (new_tags_json, list_id, accession))
+        row = conn.execute("SELECT * FROM list_items WHERE list_id = ? AND accession = ?", (list_id, accession)).fetchone()
         _touch(conn, list_id)
     return {"list_id": list_id, "item": _item(row)}
 
@@ -416,6 +444,7 @@ def import_saved(body: ImportIn, user: User = Depends(users.current_user)) -> di
         list_id = saved_list_id(conn, user.id)
         have = {r["accession"] for r in conn.execute("SELECT accession FROM list_items WHERE list_id = ?", (list_id,))}
         room = MAX_ITEMS - len(have)
+        usage = _storage_usage(conn, user.id)
         t = iso(users.now())
         added: list[str] = []
         already: list[str] = []
@@ -428,12 +457,19 @@ def import_saved(body: ImportIn, user: User = Depends(users.current_user)) -> di
             if room <= 0:
                 left_out.append(item.accession)
                 continue
+            tags_json = json.dumps(item.tags)
+            snapshot_json = item.snapshot.model_dump_json()
+            size = _stored_size(item.note, tags_json, snapshot_json)
+            if usage + size > STORAGE_MAX:
+                left_out.append(item.accession)
+                continue
             conn.execute(
                 "INSERT INTO list_items (list_id, accession, added_at, note, tags, snapshot) VALUES (?, ?, ?, ?, ?, ?)",
-                (list_id, item.accession, t, item.note, json.dumps(item.tags), item.snapshot.model_dump_json()),
+                (list_id, item.accession, t, item.note, tags_json, snapshot_json),
             )
             added.append(item.accession)
             room -= 1
+            usage += size
         if added:
             _touch(conn, list_id)
             users.audit(conn, user.id, f"imported {len(added)} saved datasets from a browser")

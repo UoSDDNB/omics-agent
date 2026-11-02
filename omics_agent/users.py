@@ -186,6 +186,10 @@ def cookie_secure() -> bool:
     return os.environ.get("LOCUS_COOKIE_INSECURE") != "1"
 
 
+def cookie_name() -> str:
+    return "__Host-locus_session" if cookie_secure() else COOKIE
+
+
 def start_session(conn: sqlite3.Connection, response: Response, user_id: int, method: str, user_agent: str = "", previous: str | None = None) -> None:
     """Creates a session and sets its cookie: a random 32-byte token in the browser, its SHA-256 in the DB. `previous` is
     the session cookie the browser came with, if any: that session ends, since the browser is about to lose its token."""
@@ -203,7 +207,7 @@ def start_session(conn: sqlite3.Connection, response: Response, user_id: int, me
 
 def set_cookie(response: Response, token: str) -> None:
     # Path=/ and no Domain: the web app reaches the API through its own /api rewrite, so the cookie is first-party.
-    response.set_cookie(COOKIE, token, max_age=SESSION_DAYS * 86400, path="/", httponly=True, samesite="lax", secure=cookie_secure())
+    response.set_cookie(cookie_name(), token, max_age=SESSION_DAYS * 86400, path="/", httponly=True, samesite="lax", secure=cookie_secure())
 
 
 def end_session(response: Response, token: str | None) -> None:
@@ -212,7 +216,7 @@ def end_session(response: Response, token: str | None) -> None:
             row = conn.execute("DELETE FROM sessions WHERE token_sha256 = ? RETURNING user_id", (sha256(token),)).fetchone()
             if row:
                 audit(conn, row["user_id"], "signed out")
-    response.delete_cookie(COOKIE, path="/", httponly=True, samesite="lax", secure=cookie_secure())
+    response.delete_cookie(cookie_name(), path="/", httponly=True, samesite="lax", secure=cookie_secure())
 
 
 @dataclass
@@ -249,7 +253,7 @@ class User:
 
 def optional_user(request: Request, response: Response) -> User | None:
     """The signed-in user, or None. Slides the session's 30-day expiry forward at most once an hour."""
-    token = request.cookies.get(COOKIE)
+    token = request.cookies.get(cookie_name())
     if not token:
         return None
     digest, t = sha256(token), now()
@@ -300,13 +304,36 @@ SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
 def require_intent(request: Request) -> None:
     """State-changing requests must say so: header X-Locus-Intent: 1 and a JSON body (on top of SameSite=Lax). A
     cross-site form cannot set either, and a fetch from another origin that sets them needs a CORS preflight. The API
-    grants that preflight only to locus's own local front ends (api.py: localhost:3000 and :3020); any other origin's
-    preflight fails."""
+    never grants a preflight for X-Locus-Intent; CORS allows only Content-Type to locus's own local front ends
+    (api.py: localhost:3000 and :3020)."""
     if request.method in SAFE_METHODS:
         return
     kind = request.headers.get("content-type", "").split(";")[0].strip().lower()
     if request.headers.get("x-locus-intent") != "1" or kind != "application/json":
         raise ApiError(403, "INTENT_REQUIRED", "This request needs the header X-Locus-Intent: 1 and a JSON body.")
+    expected = (os.environ.get("LOCUS_ORIGIN") or "").rstrip("/")
+    sent = request.headers.get("origin")
+    if expected and sent is not None and sent.rstrip("/") != expected:
+        raise ApiError(403, "ORIGIN_REFUSED", "This request came from another site.")
+
+
+WRITE_PER_MINUTE = 120
+
+
+def write_quota(request: Request, user: User | None = Depends(optional_user)) -> None:
+    if request.method in SAFE_METHODS or user is None:
+        return
+    t = now()
+    cutoff = iso(t - timedelta(seconds=60))
+    with Db() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute("DELETE FROM quota_events WHERE user_id = ? AND at <= ?", (user.id, cutoff))
+        rows = conn.execute("SELECT at FROM quota_events WHERE user_id = ? ORDER BY at", (user.id,)).fetchall()
+        if len(rows) >= WRITE_PER_MINUTE:
+            oldest = datetime.strptime(rows[0]["at"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+            wait = max(1, int((oldest + timedelta(seconds=60) - t).total_seconds()) + 1)
+            raise ApiError(429, "RATE_LIMITED", f"Too many changes at once. Please wait {wait} seconds and try again.", transient=True, headers={"Retry-After": str(wait)})
+        conn.execute("INSERT INTO quota_events (user_id, at) VALUES (?, ?)", (user.id, iso(t)))
 
 
 # ---------------------------------------------------------------- client address
@@ -327,11 +354,14 @@ def client_ip(request: Request) -> str:
     """The caller's address. Behind the web app's /api rewrite the API's peer is always loopback, so then the right-most
     X-Forwarded-For entry is used (the one the nearest proxy saw). A client can forge that header when nothing in front
     of the web app rewrites it; the overall rate limit still bounds what that buys."""
+    raw = os.environ.get("LOCUS_TRUSTED_PROXIES", "")
+    stripped = raw.strip()
+    hops = int(stripped) if stripped.isdigit() else 1
     peer = request.client.host if request.client else ""
     peer_ip = _ip(peer)
     chain = forwarded_chain(request)
-    if peer_ip is not None and peer_ip.is_loopback and chain:
-        return chain[-1]
+    if peer_ip is not None and peer_ip.is_loopback and hops > 0 and len(chain) >= hops:
+        return chain[-hops]
     return peer or "unknown"
 
 
@@ -411,6 +441,14 @@ def auth_rate_limit(request: Request) -> None:
 def install(app: FastAPI) -> None:
     """Adds the shared error handlers and the /account routes to an app."""
     from . import account
+
+    @app.middleware("http")
+    async def no_store_account(request: Request, call_next):
+        response = await call_next(request)
+        path = request.url.path
+        if path.startswith(("/account", "/lists", "/follows")) and "cache-control" not in response.headers:
+            response.headers["Cache-Control"] = "no-store"
+        return response
 
     app.add_exception_handler(ApiError, _api_error)
     app.add_exception_handler(RequestValidationError, _validation_error)

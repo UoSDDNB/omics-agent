@@ -21,12 +21,12 @@ export const ORCID_OUTCOME: Record<string, string> = {
   "already-linked": "This account already has an ORCID iD, and it is the account's only way in, so it stays.",
   cancelled: "ORCID sign-in was cancelled.",
   expired: "That ORCID sign-in took too long. Please start again.",
-  failed: "ORCID did not confirm the sign-in. Please try again.",
+  failed: "The ORCID step could not be completed in this browser. Please start again.",
 };
 
 function Fact({ label, children }: { label: string; children: React.ReactNode }) {
   return (
-    <div className="grid gap-1 border-rule px-4 first:pl-0 [&:not(:first-child)]:border-l">
+    <div data-fact className="grid gap-1 border-rule pr-4 [&:nth-child(2n)]:border-l [&:nth-child(2n)]:pl-4 sm:[&:not(:first-child)]:border-l sm:[&:not(:first-child)]:pl-4">
       <span className="label text-muted-foreground">{label}</span>
       <span className="font-mono text-[13px] tabular">{children}</span>
     </div>
@@ -108,7 +108,7 @@ export function AccountPage() {
       ) : user ? (
         <section aria-labelledby="signed-in" className="grid gap-6" data-account-page="signed-in">
           <p id="signed-in" className="text-[15px]">Signed in as <span className="font-medium">{user.display_name}</span>.</p>
-          <div className="flex flex-wrap gap-y-3 border-y border-rule py-3">
+          <div data-account-stats className="grid grid-cols-2 gap-y-3 border-y border-rule py-3 sm:flex sm:flex-wrap">
             <Fact label="Passkeys">{user.passkeys}</Fact>
             <Fact label="Recovery codes left">{user.recovery_codes_left}</Fact>
             <Fact label="ORCID">{user.orcid ?? "not linked"}</Fact>

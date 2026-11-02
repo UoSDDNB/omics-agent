@@ -32,7 +32,7 @@ from webauthn.helpers.structs import (
 from . import account, users
 from .users import ApiError, Db, User, auth_rate_limit, iso, now
 
-router = APIRouter(prefix="/account", tags=["settings"], dependencies=[Depends(users.require_intent)])
+router = APIRouter(prefix="/account", tags=["settings"], dependencies=[Depends(users.require_intent), Depends(users.write_quota)])
 NICKNAME_MAX = 80
 TOO_NEW = "A passkey added in this session cannot confirm it. Sign out, sign in with that passkey, then confirm."
 
@@ -347,6 +347,7 @@ _OWNED = (
     "DELETE FROM challenges WHERE user_id = ?",
     "DELETE FROM sessions WHERE user_id = ?",
     "DELETE FROM audit WHERE user_id = ?",
+    "DELETE FROM quota_events WHERE user_id = ?",
     "DELETE FROM users WHERE id = ?",
 )
 
@@ -362,7 +363,7 @@ def delete_account(response: Response, _: Empty | None = None, user: User = Depe
         for sql in _OWNED:
             conn.execute(sql, (user.id,))
         users.audit(conn, None, "account deleted")
-    response.delete_cookie(users.COOKIE, path="/", httponly=True, samesite="lax", secure=users.cookie_secure())
+    response.delete_cookie(users.cookie_name(), path="/", httponly=True, samesite="lax", secure=users.cookie_secure())
     return {"ok": True}
 
 

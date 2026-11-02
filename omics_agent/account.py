@@ -29,6 +29,10 @@ log = logging.getLogger(__name__)
 RP_NAME = "locus"
 
 
+def orcid_cookie_name() -> str:
+    return "__Host-locus_orcid" if users.cookie_secure() else ORCID_COOKIE
+
+
 def rp_id() -> str:
     return os.environ.get("LOCUS_RP_ID") or "localhost"
 
@@ -79,12 +83,12 @@ class Empty(BaseModel):
 
 @router.post("/sign-out")
 def sign_out(request: Request, response: Response, _: Empty | None = None) -> dict:
-    users.end_session(response, request.cookies.get(users.COOKIE))
+    users.end_session(response, request.cookies.get(users.cookie_name()))
     return {"ok": True}
 
 
 def _signed_in(conn, response: Response, request: Request, user_id: int, method: str) -> dict:
-    users.start_session(conn, response, user_id, method, request.headers.get("user-agent", ""), request.cookies.get(users.COOKIE))
+    users.start_session(conn, response, user_id, method, request.headers.get("user-agent", ""), request.cookies.get(users.cookie_name()))
     row = conn.execute("SELECT display_name, created_at FROM users WHERE id = ?", (user_id,)).fetchone()
     return User(user_id, row["display_name"], row["created_at"], method, iso(now())).public(conn)
 
@@ -218,6 +222,9 @@ def dev_login(body: DevLoginIn, request: Request, response: Response) -> dict:
     and the request comes from this machine; otherwise it is a 404 like any unknown path."""
     if os.environ.get("LOCUS_DEV_LOGIN") != "1" or not users.is_local(request):
         raise ApiError(404, "NOT_FOUND", "Not Found")
+    secret = os.environ.get("LOCUS_DEV_LOGIN_SECRET", "")
+    if secret and not secrets.compare_digest(request.headers.get("X-Locus-Dev-Secret", "").encode(), secret.encode()):
+        raise ApiError(404, "NOT_FOUND", "Not Found")
     with Db() as conn:
         user_id = users.create_user(conn, " ".join(body.display_name.split()) or "Dev")
         return {"user": _signed_in(conn, response, request, user_id, "dev")}
@@ -263,14 +270,14 @@ def orcid_start(to: str = "/account", user: User | None = Depends(users.optional
     query = urlencode({"client_id": os.environ["ORCID_CLIENT_ID"], "response_type": "code", "scope": "/authenticate",
                        "redirect_uri": orcid_redirect_uri(), "state": state})
     response = RedirectResponse(f"{orcid_base()}/oauth/authorize?{query}", status_code=302)
-    response.set_cookie(ORCID_COOKIE, nonce, max_age=int(CHALLENGE_TTL.total_seconds()), path="/", httponly=True, samesite="lax", secure=users.cookie_secure())
+    response.set_cookie(orcid_cookie_name(), nonce, max_age=int(CHALLENGE_TTL.total_seconds()), path="/", httponly=True, samesite="lax", secure=users.cookie_secure())
     return response
 
 
 def _orcid_back(to: str, outcome: str) -> RedirectResponse:
     sep = "&" if "?" in to else "?"
     response = RedirectResponse(f"{to}{sep}orcid={outcome}", status_code=302)
-    response.delete_cookie(ORCID_COOKIE, path="/", httponly=True, samesite="lax", secure=users.cookie_secure())
+    response.delete_cookie(orcid_cookie_name(), path="/", httponly=True, samesite="lax", secure=users.cookie_secure())
     return response
 
 
@@ -281,7 +288,7 @@ def orcid_callback(request: Request, state: str = "", code: str = "", error: str
     attempt can finish it. Always ends in a redirect to where the user started, with ?orcid=<outcome> (linked,
     signed-in, in-use, cancelled, expired, failed)."""
     _need_orcid()
-    nonce = request.cookies.get(ORCID_COOKIE, "")
+    nonce = request.cookies.get(orcid_cookie_name(), "")
     with Db() as conn:
         found = conn.execute("SELECT id, payload FROM challenges WHERE kind = 'orcid' AND challenge = ?", (state,)).fetchone() if state else None
         if found and not (nonce and secrets.compare_digest(json.loads(found["payload"]).get("nonce_sha256", ""), users.sha256(nonce))):
@@ -327,7 +334,7 @@ def orcid_callback(request: Request, state: str = "", code: str = "", error: str
                 # The account's own iD again, on an account with no passkey: a fresh ORCID sign-in, which lets it add
                 # its first passkey within five minutes (settings.py).
                 response = _orcid_back(to, "signed-in")
-                users.start_session(conn, response, row["user_id"], "orcid", request.headers.get("user-agent", ""), request.cookies.get(users.COOKIE))
+                users.start_session(conn, response, row["user_id"], "orcid", request.headers.get("user-agent", ""), request.cookies.get(users.cookie_name()))
                 return response
             if not linked and not has_passkey and conn.execute("SELECT 1 FROM orcid_links WHERE user_id = ?", (row["user_id"],)).fetchone():
                 # An account whose only way in is its ORCID iD never swaps it for another one: that would hand it over.
@@ -344,5 +351,5 @@ def orcid_callback(request: Request, state: str = "", code: str = "", error: str
             conn.execute("INSERT INTO orcid_links (user_id, orcid, linked_at) VALUES (?, ?, ?)", (user_id, orcid, iso(now())))
             users.audit(conn, user_id, "orcid linked")
         response = _orcid_back(to, "signed-in")
-        users.start_session(conn, response, user_id, "orcid", request.headers.get("user-agent", ""), request.cookies.get(users.COOKIE))
+        users.start_session(conn, response, user_id, "orcid", request.headers.get("user-agent", ""), request.cookies.get(users.cookie_name()))
     return response

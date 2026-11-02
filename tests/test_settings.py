@@ -284,7 +284,7 @@ def test_export_holds_own_rows_and_no_secrets(env, monkeypatch):
     for (handle,) in rows("SELECT user_handle FROM users"):
         assert handle not in text
     assert "public-key" not in text and "public_key" not in text and all(code not in text for code in codes)
-    assert c.cookies.get(users.COOKIE) not in text
+    assert c.cookies.get(users.cookie_name()) not in text
     assert client().get("/account/export").status_code == 401
 
 

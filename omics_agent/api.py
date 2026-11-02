@@ -20,7 +20,7 @@ from . import agent, assay, browse, design, design_check, everywhere, follows, l
 HEARTBEAT = 10
 
 app = FastAPI(title="omics-agent")
-app.add_middleware(CORSMiddleware, allow_origins=["http://localhost:3000", "http://localhost:3020"], allow_methods=["*"], allow_headers=["*"])
+app.add_middleware(CORSMiddleware, allow_origins=["http://localhost:3000", "http://localhost:3020"], allow_methods=["*"], allow_headers=["Content-Type"])
 # Accounts: /account/* routes and the shared {"error": {...}} shape (users.py holds sessions, CSRF guard, rate limits).
 users.install(app)
 # Saved datasets and named lists under /lists/* (saved.py); the gene-list checker keeps POST /list.

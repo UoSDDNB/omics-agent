@@ -20,7 +20,7 @@ from . import users
 from .saved import ACCESSION
 from .users import ApiError, Db, User, iso
 
-router = APIRouter(prefix="/follows/questions", tags=["follows"], dependencies=[Depends(users.require_intent)])
+router = APIRouter(prefix="/follows/questions", tags=["follows"], dependencies=[Depends(users.require_intent), Depends(users.write_quota)])
 
 MAX_WATCHES = 200
 QUESTION_MAX = 500

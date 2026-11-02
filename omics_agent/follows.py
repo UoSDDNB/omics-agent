@@ -43,7 +43,7 @@ from . import pace, person, users
 from .saved import ACCESSION
 from .users import ApiError, Db, User, iso
 
-router = APIRouter(prefix="/follows/people", tags=["follows"], dependencies=[Depends(users.require_intent)])
+router = APIRouter(prefix="/follows/people", tags=["follows"], dependencies=[Depends(users.require_intent), Depends(users.write_quota)])
 public = APIRouter(tags=["follows"])
 
 MAX_FOLLOWS = 200
@@ -68,8 +68,8 @@ ORCID_ID = re.compile(r"^\d{4}-\d{4}-\d{4}-\d{3}[\dX]$")
 # /64) and overall, a minute. Cached answers cost nothing upstream and are not counted.
 IDENTITY_LIMIT = users.RateLimiter(per_ip=30, overall=240)
 PERSON_LIMIT = users.RateLimiter(per_ip=30, overall=240)
-# Follows made, per account and overall, a minute: each new follow reads one ORCID record.
-FOLLOW_LIMIT = users.RateLimiter(per_ip=30, overall=600)
+# Follows made, per account and overall, a minute: each new follow reads one ORCID record; 60 overall is half the ORCID pace (2/s, 120/min).
+FOLLOW_LIMIT = users.RateLimiter(per_ip=30, overall=60)
 # Fresh /updates calls under way at once, app-wide; one more is refused at once with 503 (each holds a server thread).
 UPDATES_AT_ONCE = 8
 
@@ -126,6 +126,12 @@ def _spelled(word: str) -> str | None:
     return person._plain(w) if len(w) >= 2 and not w.isupper() else None
 
 
+def _record_spelled(word: str) -> str | None:
+    if "." not in word and len(word) >= 3 and word.isalpha():
+        return person._plain(word)
+    return _spelled(word)
+
+
 def _surname(words: list[str]) -> str:
     return re.sub(r"[\s'-]+", " ", person._plain(" ".join(words))).strip()
 
@@ -144,10 +150,12 @@ def names_agree(page: str, given: str | None, family: str | None) -> bool:
     surname, _, page_initials = query.rpartition(" ")
     if _surname(surname.split()) != _surname(family.split()):
         return False
-    record_words = given.split()
+    record_words = [w for w in given.split() if not person.TITLES.match(w)]
+    if not record_words:
+        return False
     record_initials = person.initials_of(record_words)
     page_first = _spelled(split[0][0]) if split and split[0] else None
-    record_first = _spelled(record_words[0]) if record_words else None
+    record_first = _record_spelled(record_words[0]) if record_words else None
     if page_first and record_first:
         if page_first != record_first:
             return False
