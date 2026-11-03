@@ -4,6 +4,7 @@ import Link from "next/link";
 import { ArrowUpRight } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Wordmark } from "@/components/logo";
+import { BackToResults } from "@/components/back-to-results";
 import { Heading, LINK, MUTED_LINK } from "@/components/page-kit";
 import { dataType } from "@/components/result-card";
 import { datasetPath, person, repositoryName, type Person, type PersonPaper } from "@/lib/api";
@@ -36,9 +37,12 @@ export function PersonPage({ name }: { name: string }) {
   return (
     <div className="mx-auto grid w-full max-w-6xl grid-cols-1 content-start gap-10">
       <nav className="flex items-center justify-between gap-4">
-        <Link href="/" aria-label="locus home" className="leading-none">
-          <Wordmark className="text-[30px]" />
-        </Link>
+        <div className="flex min-w-0 items-center gap-5">
+          <Link href="/" aria-label="locus home" className="leading-none">
+            <Wordmark className="text-[30px]" />
+          </Link>
+          <BackToResults />
+        </div>
         {rec?.search && (
           <a href={rec.search} target="_blank" rel="noreferrer" className={cn("flex shrink-0 items-center gap-1 text-[13px]", MUTED_LINK)}>
             Author search at Europe PMC
